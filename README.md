@@ -97,6 +97,88 @@ GET http://127.0.0.1:8876/api/health
 GET http://127.0.0.1:8876/api/asr/status
 ```
 
+## Agent / CLI / MCP 使用方式
+
+这个项目不仅可以作为 Web 应用运行，也可以作为 Agent 工具被 WorkBuddy 或其他自动化系统调用。推荐分三层使用：
+
+1. **CLI 工具**：适合脚本、定时任务、本地批处理。
+2. **HTTP API**：适合前端页面或其他服务调用。
+3. **MCP Server**：适合接入 WorkBuddy 自定义连接器，让 WorkBuddy 直接调用录音转写工具。
+
+### CLI：查询模型状态
+
+```bash
+PYTHONPATH=. python recorder_agent.py status
+```
+
+返回示例：
+
+```json
+{
+  "funasr": {
+    "model": "iic/SenseVoiceSmall",
+    "ready": true,
+    "state": "ready"
+  }
+}
+```
+
+### CLI：真实转写音频
+
+```bash
+PYTHONPATH=. python recorder_agent.py transcribe /path/to/audio.mp3 \
+  --title "meeting-demo" \
+  --scene meeting \
+  --glossary "芯片,工具链,编译器,AI" \
+  --output-dir ../outputs/agent-runs
+```
+
+输出包括：
+
+- `*-project.json`：完整结构化项目结果。
+- `*-transcript.md`：Markdown 纪要。
+- `*-report.json`：运行报告。
+
+CLI 同样遵守真实转写约束：模型未就绪、音频不存在、FunASR 失败或输出为空时直接失败，不生成假结果。
+
+### MCP：接入 WorkBuddy
+
+项目提供 MCP Server 入口：
+
+```bash
+PYTHONPATH=/path/to/recorder-ai-studio python /path/to/recorder-ai-studio/recorder_mcp_server.py
+```
+
+可暴露两个工具：
+
+| 工具 | 说明 |
+| --- | --- |
+| `recorder_asr_status` | 查询本地 FunASR / SenseVoiceSmall 模型状态 |
+| `recorder_transcribe` | 对本地音频执行真实转写，并导出 Markdown/JSON |
+
+WorkBuddy 的用户级 MCP 配置示例：
+
+```json
+{
+  "mcpServers": {
+    "recorder-ai-studio": {
+      "command": "python",
+      "args": ["/path/to/recorder-ai-studio/recorder_mcp_server.py"],
+      "env": {
+        "PYTHONPATH": "/path/to/recorder-ai-studio",
+        "FUNASR_MODEL": "SenseVoiceSmall",
+        "FUNASR_VAD_MODEL": "",
+        "FUNASR_PUNC_MODEL": "",
+        "FUNASR_CHUNK_SECONDS": "60",
+        "FUNASR_BATCH_SIZE_S": "60"
+      }
+    }
+  }
+}
+```
+
+配置后，在 WorkBuddy 连接器管理中启用该自定义 MCP，即可让 WorkBuddy 调用本地真实转写工具。
+
 ## API 概览
 
 | 方法 | 路径 | 说明 |
