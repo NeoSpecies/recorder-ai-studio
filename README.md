@@ -139,32 +139,25 @@ pytest -q --rootdir=. tests/test_api.py tests/test_core.py tests/test_audio_chun
 - SenseVoice 控制标记清洗逻辑通过。
 - 完整真实样例测试通过。
 
-## 已完成的真实样例验证
+## 真实样例验证
 
-使用用户提供的完整 MP3：
+项目内置了真实音频端到端测试脚本，但不会提交任何私有音频。运行前请通过环境变量指定测试音频：
 
-```text
-04-24 内部会议. 芯片与工具链进展.mp3
+```bash
+export RECORDER_AI_TEST_AUDIO="/path/to/your/meeting-audio.mp3"
+export RECORDER_AI_TEST_TITLE="meeting-audio"
+python run_real_asr_test.py
 ```
 
-验证结果：
+验证目标：
 
-- 转写来源：`local_funasr`
-- 模型：SenseVoiceSmall
-- 未使用 mock / fallback
-- 完整转写耗时：约 119.38 秒
-- 生成转写段落：92 段
-- 回归测试：7 passed
-- 输出目录：`../outputs/full-asr-test/`
+- 转写来源必须是 `local_funasr`。
+- 不允许使用 mock / fallback。
+- FunASR 产出为空时直接失败。
+- 可同时验证后端健康检查、项目创建、上传、导出链路。
+- 输出目录默认是 `../outputs/real-asr-test/`，可通过 `RECORDER_AI_OUTPUT_DIR` 自定义。
 
-主要输出：
-
-```text
-../outputs/full-asr-test/full-asr-test-summary.md
-../outputs/full-asr-test/04-24-full-local-funasr-transcript.md
-../outputs/full-asr-test/04-24-full-local-funasr-report.json
-../outputs/full-asr-test/04-24-full-local-funasr-project.json
-```
+在本地开发机上，曾使用一段约 91 分钟的真实会议录音完成端到端验证：本地 SenseVoiceSmall 识别耗时约 119.38 秒，生成 92 段转写，回归测试 7 passed。该音频和完整转写内容不包含在仓库中。
 
 ## 性能调优方向
 

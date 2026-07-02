@@ -9,7 +9,7 @@ from run_real_asr_test import main as run_real_asr_test
 from server.core import get_funasr_model_status
 
 WORKSPACE = Path(__file__).resolve().parent.parent
-REPORT_PATH = WORKSPACE / "outputs" / "04-24 内部会议. 芯片与工具链进展-等待并识别报告.json"
+REPORT_PATH = Path(os.environ.get("RECORDER_AI_WAIT_REPORT", WORKSPACE / "outputs" / "real-asr-test" / "wait-and-run-report.json"))
 
 
 def write_report(payload: dict) -> None:
@@ -27,7 +27,7 @@ def wait_for_model(timeout_seconds: int = 6 * 60 * 60, interval_seconds: int = 3
             "stage": "waiting_model",
             "status": status,
             "elapsedSeconds": round(time.time() - started, 1),
-            "note": "等待 SenseVoiceSmall model.pt 下载完成；不会使用 fallback 或 mock。",
+            "note": "Waiting for SenseVoiceSmall model.pt. No fallback or mock transcript will be used.",
         })
         if status.get("ready"):
             return status

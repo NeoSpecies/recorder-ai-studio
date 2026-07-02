@@ -10,8 +10,8 @@ from server.core import generate_insights, local_funasr_transcript, project_to_m
 
 ROOT = Path(__file__).resolve().parent
 WORKSPACE = ROOT.parent
-AUDIO_PATH = Path("/Users/neoco/Documents/asr原始文件/04-24 内部会议. 芯片与工具链进展.mp3")
-OUTPUT_DIR = WORKSPACE / "outputs"
+AUDIO_PATH = Path(os.environ.get("RECORDER_AI_TEST_AUDIO", ROOT / "samples" / "meeting-demo.mp3"))
+OUTPUT_DIR = Path(os.environ.get("RECORDER_AI_OUTPUT_DIR", WORKSPACE / "outputs" / "real-asr-test"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 os.environ.setdefault("HOME", str(WORKSPACE / ".cache" / "home"))
@@ -21,8 +21,20 @@ os.environ.setdefault("FUNASR_MODEL", "SenseVoiceSmall")
 os.environ.setdefault("FUNASR_CHUNK_SECONDS", "600")
 os.environ.setdefault("FUNASR_BATCH_SIZE_S", "300")
 
-PROJECT_TITLE = "04-24 内部会议. 芯片与工具链进展"
-BASE_URL = os.environ.get("RECORDER_AI_BASE_URL", "http://127.0.0.1:8878")
+PROJECT_TITLE = os.environ.get("RECORDER_AI_TEST_TITLE", AUDIO_PATH.stem or "Real ASR Test")
+BASE_URL = os.environ.get("RECORDER_AI_BASE_URL", "http://127.0.0.1:8876")
+GLOSSARY = [item.strip() for item in os.environ.get("RECORDER_AI_GLOSSARY", "芯片,工具链,编译器,AI,研发,适配,版本").split(",") if item.strip()]
+
+
+def safe_slug(value: str) -> str:
+    chars = []
+    for char in value.strip().lower():
+        if char.isalnum():
+            chars.append(char)
+        elif char in {" ", "-", "_", "."}:
+            chars.append("-")
+    slug = "".join(chars).strip("-")
+    return slug or "real-asr-test"
 
 
 def write_json(path: Path, payload) -> None:
@@ -31,7 +43,9 @@ def write_json(path: Path, payload) -> None:
 
 def main() -> None:
     if not AUDIO_PATH.exists():
-        raise FileNotFoundError(AUDIO_PATH)
+        raise FileNotFoundError(
+            f"Test audio not found: {AUDIO_PATH}. Set RECORDER_AI_TEST_AUDIO=/path/to/audio before running."
+        )
 
     segments = local_funasr_transcript(AUDIO_PATH)
     if not segments:
@@ -41,7 +55,7 @@ def main() -> None:
         "id": "real-asr-local-funasr",
         "title": PROJECT_TITLE,
         "scene": "meeting",
-        "glossary": ["芯片", "工具链", "编译器", "内部会议", "AI", "研发", "适配", "版本"],
+        "glossary": GLOSSARY,
         "audio": {
             "name": AUDIO_PATH.name,
             "path": str(AUDIO_PATH),
@@ -50,15 +64,17 @@ def main() -> None:
         },
         "duration": 0,
         "segments": segments,
-        "tags": ["#芯片", "#工具链", "#内部会议"],
+        "tags": sorted({tag for segment in segments for tag in segment.get("tags", [])}),
         "todos": [],
         "insights": None,
+        "transcriptionSource": "local_funasr",
     }
     generate_insights(project)
 
-    raw_json_path = OUTPUT_DIR / "04-24 内部会议. 芯片与工具链进展-真实FunASR结果.json"
-    md_path = OUTPUT_DIR / "04-24 内部会议. 芯片与工具链进展-真实FunASR校对稿.md"
-    report_path = OUTPUT_DIR / "04-24 内部会议. 芯片与工具链进展-端到端测试报告.json"
+    slug = safe_slug(PROJECT_TITLE)
+    raw_json_path = OUTPUT_DIR / f"{slug}-local-funasr-result.json"
+    md_path = OUTPUT_DIR / f"{slug}-local-funasr-transcript.md"
+    report_path = OUTPUT_DIR / f"{slug}-e2e-report.json"
 
     write_json(raw_json_path, {"source": "local_funasr", "segment_count": len(segments), "project": project})
     md_path.write_text(project_to_markdown(project), encoding="utf-8")
@@ -75,14 +91,20 @@ def main() -> None:
             })
             created.raise_for_status()
             project_id = created.json()["project"]["id"]
-            with AUDIO_PATH.open("rb") as f:
-                uploaded = client.post(f"/api/projects/{project_id}/upload", files={"file": (AUDIO_PATH.name, f, "audio/mpeg")})
+            with AUDIO_PATH.open("rb") as file_obj:
+                uploaded = client.post(
+                    f"/api/projects/{project_id}/upload",
+                    files={"file": (AUDIO_PATH.name, file_obj, "audio/mpeg")},
+                )
             uploaded.raise_for_status()
-            updated = client.put(f"/api/projects/{project_id}", json={"segments": segments, "insights": project["insights"], "tags": project["tags"]})
+            updated = client.put(
+                f"/api/projects/{project_id}",
+                json={"segments": segments, "insights": project["insights"], "tags": project["tags"]},
+            )
             updated.raise_for_status()
             exported = client.get(f"/api/projects/{project_id}/export.md")
             exported.raise_for_status()
-            api_md_path = OUTPUT_DIR / "04-24 内部会议. 芯片与工具链进展-后端导出校对稿.md"
+            api_md_path = OUTPUT_DIR / f"{slug}-api-export.md"
             api_md_path.write_text(exported.text, encoding="utf-8")
             api_result = {
                 "checked": True,
