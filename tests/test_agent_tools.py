@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+import recorder_mcp_server
 from server import agent_tools
 
 
@@ -70,3 +71,44 @@ def test_transcribe_audio_builds_outputs(monkeypatch, tmp_path: Path):
     assert Path(result["outputs"]["projectJson"]).exists()
     assert Path(result["outputs"]["markdown"]).exists()
     assert Path(result["outputs"]["report"]).exists()
+
+
+def test_mcp_transcribe_submits_non_blocking_job(monkeypatch, tmp_path: Path):
+    audio = tmp_path / "sample.wav"
+    audio.write_bytes(b"not real audio")
+    monkeypatch.setattr(recorder_mcp_server, "JOB_DIR", tmp_path / "jobs")
+
+    submitted = []
+
+    class FakeExecutor:
+        def submit(self, fn, *args, **kwargs):
+            submitted.append((fn, args, kwargs))
+            return None
+
+    monkeypatch.setattr(recorder_mcp_server, "_executor", FakeExecutor())
+    result = recorder_mcp_server.recorder_transcribe(str(audio), title="测试项目")
+
+    assert result["ok"] is True
+    assert result["submitted"] is True
+    assert result["jobId"]
+    assert result["status"] == "queued"
+    assert submitted and submitted[0][0] == recorder_mcp_server._run_transcription_job
+    status = recorder_mcp_server.recorder_job_status(result["jobId"])
+    assert status["status"] == "queued"
+
+
+def test_mcp_job_result_waits_until_completed(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(recorder_mcp_server, "JOB_DIR", tmp_path / "jobs")
+    job = {
+        "jobId": "job-1",
+        "status": "running",
+        "createdAt": "now",
+        "updatedAt": "now",
+        "request": {"audioPath": "sample.wav"},
+        "outputs": {},
+        "logPath": str(tmp_path / "jobs/job-1.log"),
+    }
+    recorder_mcp_server._write_job(job)
+    result = recorder_mcp_server.recorder_job_result("job-1")
+    assert result["ok"] is False
+    assert result["status"] == "running"

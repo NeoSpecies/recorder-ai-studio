@@ -181,13 +181,15 @@ PYTHONPATH=. python recorder_agent.py release
 PYTHONPATH=/path/to/recorder-ai-studio python /path/to/recorder-ai-studio/recorder_mcp_server.py
 ```
 
-可暴露两个工具：
+可暴露五个工具：
 
 | 工具 | 说明 |
 | --- | --- |
 | `recorder_asr_status` | 查询本地 FunASR / SenseVoiceSmall 模型和运行时保活状态 |
 | `recorder_release_model` | 立即释放当前进程中已加载的本地模型 |
-| `recorder_transcribe` | 对本地音频执行真实转写，并导出 Markdown/JSON |
+| `recorder_transcribe` | 提交非阻塞真实转写任务，立即返回 `jobId` |
+| `recorder_job_status` | 查询转写任务状态、日志路径和输出路径 |
+| `recorder_job_result` | 任务完成后获取 Markdown/JSON/report 输出 |
 
 WorkBuddy 的用户级 MCP 配置示例：
 
@@ -212,6 +214,18 @@ WorkBuddy 的用户级 MCP 配置示例：
 ```
 
 配置后，在 WorkBuddy 连接器管理中启用该自定义 MCP，即可让 WorkBuddy 调用本地真实转写工具。
+
+MCP 转写采用非阻塞任务模式，避免长录音转写时 WorkBuddy 一直占用单次 JSON-RPC 调用：
+
+1. 调用 `recorder_transcribe` 提交任务并获取 `jobId`。
+2. 调用 `recorder_job_status(jobId)` 查询 `queued` / `running` / `completed` / `failed`。
+3. 完成后调用 `recorder_job_result(jobId)` 获取 Markdown、project JSON、report JSON 路径。
+
+默认任务文件和日志写入：
+
+```text
+../outputs/mcp-jobs/
+```
 
 ## API 概览
 
