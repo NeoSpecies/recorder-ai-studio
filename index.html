@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Recorder AI Studio - 长录音转写与校对</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">R</div>
+        <div>
+          <h1>Recorder AI Studio</h1>
+          <p>本地 FunASR · 云端整理</p>
+        </div>
+      </div>
+
+      <button class="primary full" id="newRecordingBtn">+ 新建录音项目</button>
+
+      <section class="side-card import-card">
+        <div class="side-card-header">
+          <span>真实导入</span>
+          <span class="status-pill" id="storageStatus">Local</span>
+        </div>
+        <label class="file-drop" id="dropZone">
+          <input id="audioFileInput" type="file" accept="audio/*,video/mp4,.m4a,.mp3,.wav,.flac,.aac,.mp4" />
+          <b>选择或拖入音频/视频</b>
+          <small>上传到本机后端，不出本机。</small>
+        </label>
+        <label class="mini-label">FunASR API（可选远程服务）
+          <input id="funasrEndpoint" placeholder="留空则使用本机 Python FunASR" />
+        </label>
+        <button class="secondary full" id="callFunasrBtn">真实转写音频</button>
+      </section>
+
+      <nav class="nav" id="projectNav"></nav>
+
+      <section class="side-card compact">
+        <p>主题</p>
+        <div class="theme-switch">
+          <button class="active" data-theme="auto">跟随系统</button>
+          <button data-theme="light">亮色</button>
+          <button data-theme="dark">暗色</button>
+        </div>
+      </section>
+
+      <section class="side-card compact">
+        <p>隐私边界</p>
+        <strong>音频默认只在本地处理</strong>
+        <small>音频上传到本机 FastAPI 服务；本版本已移除示例回退，只有 FunASR 成功才会展示转写。</small>
+      </section>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Workspace / 长录音智能校对</p>
+          <h2 id="recordingTitle" contenteditable="true">未命名录音</h2>
+        </div>
+        <div class="top-actions">
+          <button class="ghost" id="exportMarkdownBtn">导出 Markdown</button>
+          <button class="ghost" id="exportJsonBtn">导出 JSON</button>
+          <button class="primary" id="generateInsightsBtn">生成整理结果</button>
+        </div>
+      </header>
+
+      <section class="hero-grid">
+        <article class="upload-card" id="uploadCard">
+          <div class="upload-icon">⌁</div>
+          <div>
+            <h3 id="fileNameText">尚未导入音频</h3>
+            <p id="fileMetaText">导入后可真实播放、生成波形、保存项目、编辑转写、导出结果。</p>
+          </div>
+          <button class="secondary" id="saveProjectBtn">保存项目</button>
+        </article>
+
+        <article class="metric-card">
+          <span>处理状态</span>
+          <strong id="progressText">待导入</strong>
+          <div class="meter big"><i id="progressBar" style="width:0%"></i></div>
+        </article>
+        <article class="metric-card">
+          <span>音频时长</span>
+          <strong id="durationText">--:--</strong>
+          <small id="audioStateText">未加载</small>
+        </article>
+        <article class="metric-card">
+          <span>说话人</span>
+          <strong id="speakerCountText">0</strong>
+          <small id="segmentCountText">0 个转写段落</small>
+        </article>
+      </section>
+
+      <section class="workspace-grid">
+        <section class="panel transcript-panel">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Transcript Editor</p>
+              <h3>转写校对工作台</h3>
+            </div>
+            <div class="segmented" id="viewModeSwitch">
+              <button class="active" data-mode="paragraph">段落</button>
+              <button data-mode="timeline">时间轴</button>
+              <button data-mode="diff">校对差异</button>
+            </div>
+          </div>
+
+          <audio id="audioPlayer" controls></audio>
+          <div class="audio-strip">
+            <button class="play" id="playBtn">▶</button>
+            <div class="waveform" id="waveform"></div>
+            <span id="playTimeText">00:00 / 00:00</span>
+          </div>
+
+          <div class="editor-toolbar">
+            <button class="ghost small" id="addSegmentBtn">+ 段落</button>
+            <button class="ghost small" id="mergeSpeakersBtn">合并同名说话人</button>
+            <label class="search-box"><input id="searchInput" placeholder="搜索转写、标签、说话人" /></label>
+          </div>
+
+          <div class="speaker-row" id="speakerRow"></div>
+          <div class="transcript-list" id="transcriptList"></div>
+        </section>
+
+        <aside class="panel ai-panel">
+          <div class="panel-head sticky-head">
+            <div>
+              <p class="eyebrow">Plaud-like Intelligence</p>
+              <h3>AI 整理中心</h3>
+            </div>
+            <span class="status-pill" id="insightStatus">待生成</span>
+          </div>
+
+          <div class="tabs" id="aiTabs">
+            <button class="active" data-tab="summary">提要</button>
+            <button data-tab="mindmap">脑图</button>
+            <button data-tab="todos">待办</button>
+            <button data-tab="tags">标签</button>
+          </div>
+
+          <div class="tab-content active" id="summaryTab">
+            <div class="insight-card highlight">
+              <h4>关键内容提要</h4>
+              <ol id="summaryList"></ol>
+            </div>
+            <div class="insight-card">
+              <h4>决策 / 结论</h4>
+              <div id="decisionList" class="empty-state">点击“生成整理结果”。</div>
+            </div>
+            <div class="insight-card">
+              <h4>风险提示</h4>
+              <div id="riskList" class="empty-state">待从转写中提取。</div>
+            </div>
+          </div>
+
+          <div class="tab-content" id="mindmapTab">
+            <div class="mindmap" id="mindmap"></div>
+          </div>
+
+          <div class="tab-content" id="todosTab">
+            <div class="scenario-switch" id="scenarioSwitch">
+              <button class="active" data-scenario="meeting">会议</button>
+              <button data-scenario="sales">销售</button>
+              <button data-scenario="interview">访谈</button>
+              <button data-scenario="lecture">课程</button>
+            </div>
+            <div id="todoList" class="todo-list"></div>
+          </div>
+
+          <div class="tab-content" id="tagsTab">
+            <div class="tag-input-row">
+              <input id="tagInput" placeholder="新增标签，如 #客户需求" />
+              <button class="primary small" id="addTagBtn">添加</button>
+            </div>
+            <div class="tag-cloud" id="tagCloud"></div>
+            <div class="insight-card">
+              <h4>自动标签规则</h4>
+              <p>根据转写文本中的关键词、说话人、场景、风险词提取；可手动增删，导出时一并保留。</p>
+            </div>
+          </div>
+        </aside>
+      </section>
+
+      <section class="panel blueprint-panel">
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">Runtime Plan</p>
+            <h3>真实处理流水线</h3>
+          </div>
+        </div>
+        <div class="pipeline">
+          <div><b>01</b><span>浏览器导入</span><p>真实读取本地音频，生成 Object URL 和元数据</p></div>
+          <i></i>
+          <div><b>02</b><span>本地播放/波形</span><p>Audio + WebAudio 解码，点击段落定位播放</p></div>
+          <i></i>
+          <div><b>03</b><span>FunASR 接入</span><p>优先本机 Python FunASR；也可配置 OpenAI 兼容接口</p></div>
+          <i></i>
+          <div><b>04</b><span>校对编辑</span><p>段落、说话人、标签、待办均可编辑保存</p></div>
+          <i></i>
+          <div><b>05</b><span>整理导出</span><p>本地生成摘要/脑图/待办，导出 Markdown/JSON</p></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="modal" id="newRecordingModal" aria-hidden="true">
+    <div class="modal-card">
+      <button class="modal-close" id="closeModalBtn">×</button>
+      <p class="eyebrow">New Recording</p>
+      <h3>创建长录音项目</h3>
+      <label>项目标题
+        <input id="newTitleInput" value="长录音项目" />
+      </label>
+      <label>场景模板
+        <select id="newSceneSelect">
+          <option value="meeting">会议纪要：决策 / 风险 / 待办</option>
+          <option value="sales">销售拜访：客户痛点 / 商机 / 下一步</option>
+          <option value="interview">访谈播客：人物观点 / 金句 / 时间轴</option>
+          <option value="lecture">课程学习：概念 / 例题 / 复习计划</option>
+        </select>
+      </label>
+      <label>术语表 / 热词
+        <input id="newGlossaryInput" placeholder="例如：芯片, 工具链, 编译器" />
+      </label>
+      <button class="primary full" id="createProjectBtn">创建项目</button>
+    </div>
+  </div>
+
+  <script src="./app.js"></script>
+</body>
+</html>

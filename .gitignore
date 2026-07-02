@@ -1,0 +1,37 @@
+# Python cache and test artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local runtime data and uploaded/private audio
+data/
+data-*/
+uploads/
+uploads-*/
+*.mp3
+*.wav
+*.m4a
+*.aac
+*.flac
+
+# Model/cache artifacts
+.cache/
+models/
+*.pt
+*.onnx
+*.bin
+*.safetensors
+
+# Logs and temporary files
+*.log
+*.tmp
+.DS_Store
+
+# Local environment files
+.env
+.env.*
+.venv/
+venv/
+node_modules/
