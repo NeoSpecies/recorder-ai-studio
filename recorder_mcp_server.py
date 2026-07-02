@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+from contextlib import redirect_stdout
 from pathlib import Path
 from typing import Optional
+import sys
 
 from mcp.server.fastmcp import FastMCP
 
@@ -40,14 +42,15 @@ def recorder_transcribe(
         glossary: Comma-separated glossary terms used for tagging.
         output_dir: Optional directory for exported Markdown, project JSON and report.
     """
-    result = transcribe_audio_file(
-        audio_path=audio_path,
-        output_dir=output_dir,
-        title=title,
-        scene=scene,
-        glossary=glossary,
-        write_files=True,
-    )
+    with redirect_stdout(sys.stderr):
+        result = transcribe_audio_file(
+            audio_path=audio_path,
+            output_dir=output_dir,
+            title=title,
+            scene=scene,
+            glossary=glossary,
+            write_files=True,
+        )
     return {key: value for key, value in result.items() if key != "project"}
 
 
