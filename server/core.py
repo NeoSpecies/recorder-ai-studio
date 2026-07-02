@@ -6,6 +6,8 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -134,6 +136,158 @@ def resolve_funasr_model(model_name: str) -> str:
 
 
 
+_ASR_ENGINE: Optional["FunASREngine"] = None
+_ASR_ENGINE_LOCK = threading.RLock()
+
+
+def funasr_keepalive_seconds() -> int:
+    try:
+        return max(0, int(os.environ.get("FUNASR_KEEPALIVE_SECONDS", "600")))
+    except ValueError:
+        return 600
+
+
+class FunASREngine:
+    """Process-local FunASR engine with idle-time release.
+
+    The model is reused within FUNASR_KEEPALIVE_SECONDS after the last task, and
+    released once it has been idle for longer than that threshold. This avoids a
+    permanently resident model while reducing repeated cold starts during active
+    WorkBuddy/CLI/MCP sessions.
+    """
+
+    def __init__(self, keepalive_seconds: Optional[int] = None) -> None:
+        self.keepalive_seconds = funasr_keepalive_seconds() if keepalive_seconds is None else max(0, keepalive_seconds)
+        self.model = None
+        self.model_signature: Optional[tuple[str, str, str, Optional[str]]] = None
+        self.loaded_at: Optional[float] = None
+        self.last_used_at: Optional[float] = None
+        self.last_load_seconds: Optional[float] = None
+        self.last_inference_seconds: Optional[float] = None
+        self.load_count = 0
+        self.release_count = 0
+        self.lock = threading.RLock()
+
+    def _signature(self) -> tuple[str, str, str, Optional[str]]:
+        return (
+            resolve_funasr_model(os.environ.get("FUNASR_MODEL", "SenseVoiceSmall")),
+            os.environ.get("FUNASR_VAD_MODEL", "fsmn-vad"),
+            os.environ.get("FUNASR_PUNC_MODEL", "ct-punc"),
+            os.environ.get("FUNASR_SPK_MODEL", "") or None,
+        )
+
+    def _load_model(self, signature: tuple[str, str, str, Optional[str]]):
+        try:
+            from funasr import AutoModel
+        except Exception as exc:
+            raise RuntimeError(f"funasr is not installed: {exc}") from exc
+
+        model_name, vad_model, punc_model, spk_model = signature
+        kwargs: Dict[str, Any] = {"model": model_name, "disable_update": True}
+        if vad_model:
+            kwargs["vad_model"] = vad_model
+        if punc_model:
+            kwargs["punc_model"] = punc_model
+        if spk_model:
+            kwargs["spk_model"] = spk_model
+        start = time.monotonic()
+        model = AutoModel(**kwargs)
+        self.last_load_seconds = round(time.monotonic() - start, 3)
+        self.load_count += 1
+        return model
+
+    def release(self) -> None:
+        with self.lock:
+            if self.model is not None:
+                self.model = None
+                self.model_signature = None
+                self.loaded_at = None
+                self.release_count += 1
+
+    def release_if_idle(self) -> bool:
+        with self.lock:
+            if self.model is None or self.last_used_at is None:
+                return False
+            if self.keepalive_seconds <= 0 or time.monotonic() - self.last_used_at > self.keepalive_seconds:
+                self.release()
+                return True
+            return False
+
+    def ensure_model(self):
+        with self.lock:
+            self.release_if_idle()
+            signature = self._signature()
+            if self.model is None or self.model_signature != signature:
+                self.model = self._load_model(signature)
+                self.model_signature = signature
+                self.loaded_at = time.monotonic()
+            return self.model
+
+    def transcribe(self, audio_path: Path) -> List[Dict[str, Any]]:
+        with self.lock:
+            model = self.ensure_model()
+            chunk_seconds = int(os.environ.get("FUNASR_CHUNK_SECONDS", "600"))
+            batch_size_s = int(os.environ.get("FUNASR_BATCH_SIZE_S", "300"))
+            segments: List[Dict[str, Any]] = []
+            start = time.monotonic()
+            try:
+                for chunk_path, offset in iter_audio_chunks(audio_path, chunk_seconds=chunk_seconds):
+                    try:
+                        result = model.generate(input=str(chunk_path), batch_size_s=batch_size_s)
+                        chunk_segments = normalize_funasr_result(result)
+                        for segment in chunk_segments:
+                            segment["start"] = float(segment.get("start") or 0) + offset
+                            segment["end"] = float(segment.get("end") or 0) + offset
+                            segments.append(segment)
+                    finally:
+                        if chunk_path != audio_path:
+                            chunk_path.unlink(missing_ok=True)
+                return segments
+            finally:
+                self.last_inference_seconds = round(time.monotonic() - start, 3)
+                self.last_used_at = time.monotonic()
+
+    def status(self) -> Dict[str, Any]:
+        with self.lock:
+            self.release_if_idle()
+            now = time.monotonic()
+            loaded = self.model is not None
+            idle_seconds = None if self.last_used_at is None else round(now - self.last_used_at, 3)
+            remaining = None
+            if loaded and idle_seconds is not None:
+                remaining = max(0, round(self.keepalive_seconds - idle_seconds, 3))
+            return {
+                "loaded": loaded,
+                "keepaliveSeconds": self.keepalive_seconds,
+                "idleSeconds": idle_seconds,
+                "remainingKeepaliveSeconds": remaining,
+                "lastLoadSeconds": self.last_load_seconds,
+                "lastInferenceSeconds": self.last_inference_seconds,
+                "loadCount": self.load_count,
+                "releaseCount": self.release_count,
+                "modelSignature": list(self.model_signature) if self.model_signature else None,
+            }
+
+
+def get_funasr_engine() -> FunASREngine:
+    global _ASR_ENGINE
+    with _ASR_ENGINE_LOCK:
+        keepalive = funasr_keepalive_seconds()
+        if _ASR_ENGINE is None or _ASR_ENGINE.keepalive_seconds != keepalive:
+            _ASR_ENGINE = FunASREngine(keepalive_seconds=keepalive)
+        return _ASR_ENGINE
+
+
+def get_funasr_runtime_status() -> Dict[str, Any]:
+    return get_funasr_engine().status()
+
+
+def release_funasr_model() -> Dict[str, Any]:
+    engine = get_funasr_engine()
+    engine.release()
+    return engine.status()
+
+
 def local_funasr_transcript(audio_path: Path) -> List[Dict[str, Any]]:
     """Run local FunASR inference and normalize sentence segments.
 
@@ -142,39 +296,7 @@ def local_funasr_transcript(audio_path: Path) -> List[Dict[str, Any]]:
     code path usable from the API and from end-to-end test scripts. It never
     fabricates transcript text; failures are surfaced to the API caller.
     """
-    try:
-        from funasr import AutoModel
-    except Exception as exc:
-        raise RuntimeError(f"funasr is not installed: {exc}") from exc
-
-    model_name = resolve_funasr_model(os.environ.get("FUNASR_MODEL", "SenseVoiceSmall"))
-    vad_model = os.environ.get("FUNASR_VAD_MODEL", "fsmn-vad")
-    punc_model = os.environ.get("FUNASR_PUNC_MODEL", "ct-punc")
-    spk_model = os.environ.get("FUNASR_SPK_MODEL", "") or None
-    kwargs: Dict[str, Any] = {"model": model_name, "disable_update": True}
-    if vad_model:
-        kwargs["vad_model"] = vad_model
-    if punc_model:
-        kwargs["punc_model"] = punc_model
-    if spk_model:
-        kwargs["spk_model"] = spk_model
-    model = AutoModel(**kwargs)
-
-    chunk_seconds = int(os.environ.get("FUNASR_CHUNK_SECONDS", "600"))
-    batch_size_s = int(os.environ.get("FUNASR_BATCH_SIZE_S", "300"))
-    segments: List[Dict[str, Any]] = []
-    for chunk_path, offset in iter_audio_chunks(audio_path, chunk_seconds=chunk_seconds):
-        try:
-            result = model.generate(input=str(chunk_path), batch_size_s=batch_size_s)
-            chunk_segments = normalize_funasr_result(result)
-            for segment in chunk_segments:
-                segment["start"] = float(segment.get("start") or 0) + offset
-                segment["end"] = float(segment.get("end") or 0) + offset
-                segments.append(segment)
-        finally:
-            if chunk_path != audio_path:
-                chunk_path.unlink(missing_ok=True)
-    return segments
+    return get_funasr_engine().transcribe(audio_path)
 
 
 

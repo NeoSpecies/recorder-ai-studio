@@ -8,21 +8,28 @@ import sys
 
 from mcp.server.fastmcp import FastMCP
 
-from server.agent_tools import model_status, transcribe_audio_file
+from server.agent_tools import model_status, release_model, transcribe_audio_file
 
 WORKSPACE = Path(__file__).resolve().parent.parent
 os.environ.setdefault("HOME", str(WORKSPACE / ".cache" / "home"))
 os.environ.setdefault("MODELSCOPE_CACHE", str(WORKSPACE / ".cache" / "modelscope"))
 os.environ.setdefault("MODELSCOPE_CREDENTIALS_PATH", str(WORKSPACE / ".cache" / "modelscope" / "credentials"))
 os.environ.setdefault("FUNASR_MODEL", "SenseVoiceSmall")
+os.environ.setdefault("FUNASR_KEEPALIVE_SECONDS", "600")
 
 mcp = FastMCP("recorder-ai-studio")
 
 
 @mcp.tool()
 def recorder_asr_status() -> dict:
-    """Return local FunASR / SenseVoiceSmall model status."""
+    """Return local FunASR / SenseVoiceSmall model and runtime status."""
     return model_status()
+
+
+@mcp.tool()
+def recorder_release_model() -> dict:
+    """Release the loaded local FunASR model immediately."""
+    return release_model()
 
 
 @mcp.tool()

@@ -29,11 +29,21 @@ def test_transcribe_audio_refuses_unready_model(monkeypatch, tmp_path: Path):
         agent_tools.transcribe_audio_file(audio, write_files=False)
 
 
+def test_model_status_includes_runtime(monkeypatch):
+    monkeypatch.setattr(agent_tools, "get_funasr_model_status", lambda model_name=None: {"ready": True, "state": "ready"})
+    monkeypatch.setattr(agent_tools, "get_funasr_runtime_status", lambda: {"loaded": False, "keepaliveSeconds": 600})
+    status = agent_tools.model_status()
+    assert status["funasr"]["ready"] is True
+    assert status["runtime"]["keepaliveSeconds"] == 600
+
+
+
 def test_transcribe_audio_builds_outputs(monkeypatch, tmp_path: Path):
     audio = tmp_path / "sample.wav"
     audio.write_bytes(b"not real audio")
     out_dir = tmp_path / "outputs"
     monkeypatch.setattr(agent_tools, "get_funasr_model_status", lambda: {"ready": True, "state": "ready"})
+    monkeypatch.setattr(agent_tools, "get_funasr_runtime_status", lambda: {"loaded": True, "keepaliveSeconds": 600})
     monkeypatch.setattr(
         agent_tools,
         "local_funasr_transcript",
@@ -56,6 +66,7 @@ def test_transcribe_audio_builds_outputs(monkeypatch, tmp_path: Path):
     assert result["source"] == "local_funasr"
     assert result["noMockFallback"] is True
     assert result["segmentCount"] == 1
+    assert result["runtime"]["loaded"] is True
     assert Path(result["outputs"]["projectJson"]).exists()
     assert Path(result["outputs"]["markdown"]).exists()
     assert Path(result["outputs"]["report"]).exists()

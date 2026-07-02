@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .core import ProjectStore, generate_insights, get_funasr_model_status, local_funasr_transcript, normalize_funasr_result, project_to_markdown
+from .core import ProjectStore, generate_insights, get_funasr_model_status, get_funasr_runtime_status, local_funasr_transcript, normalize_funasr_result, project_to_markdown
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = Path(os.environ.get("RECORDER_AI_DATA", ROOT / "data"))
@@ -59,7 +59,7 @@ def health() -> Dict[str, Any]:
 
 @app.get("/api/asr/status")
 def asr_status() -> Dict[str, Any]:
-    return {"funasr": get_funasr_model_status()}
+    return {"funasr": get_funasr_model_status(), "runtime": get_funasr_runtime_status()}
 
 
 @app.get("/api/projects")
@@ -147,7 +147,7 @@ def transcribe(project_id: str, payload: TranscribeRequest = TranscribeRequest()
     project = store.set_segments(project_id, segments)
     project["transcriptionSource"] = source
     store.save_project(project)
-    return {"project": project, "segments": segments, "source": source}
+    return {"project": project, "segments": segments, "source": source, "runtime": get_funasr_runtime_status()}
 
 
 @app.post("/api/projects/{project_id}/insights")

@@ -36,14 +36,19 @@ recorder-ai-studio/
 ├── styles.css                         # 明暗主题与页面样式
 ├── app.js                             # 前端交互与 API 调用
 ├── requirements.txt                   # Python 依赖
+├── recorder_agent.py                  # CLI Agent 入口
+├── recorder_mcp_server.py             # MCP Server 入口
 ├── run_real_asr_test.py               # 真实音频转写测试脚本
 ├── continue_real_asr_after_model_ready.py
 ├── server/
 │   ├── app.py                         # FastAPI 接口与静态服务
-│   └── core.py                        # 项目存储、FunASR 调用、整理与导出逻辑
+│   ├── agent_tools.py                 # CLI/API/MCP 共享工具层
+│   └── core.py                        # 项目存储、FunASR 调用、保活引擎、整理与导出逻辑
 └── tests/
     ├── test_api.py                    # API 测试
     ├── test_core.py                   # 核心逻辑测试
+    ├── test_agent_tools.py            # Agent 工具层测试
+    ├── test_asr_engine.py             # 模型闲置保活策略测试
     └── test_audio_chunks.py           # 长音频分片相关测试
 ```
 
@@ -75,6 +80,7 @@ export FUNASR_VAD_MODEL=""
 export FUNASR_PUNC_MODEL=""
 export FUNASR_CHUNK_SECONDS="60"
 export FUNASR_BATCH_SIZE_S="60"
+export FUNASR_KEEPALIVE_SECONDS="600"
 
 python -m uvicorn server.app:app --host 127.0.0.1 --port 8876
 ```
@@ -119,6 +125,11 @@ PYTHONPATH=. python recorder_agent.py status
     "model": "iic/SenseVoiceSmall",
     "ready": true,
     "state": "ready"
+  },
+  "runtime": {
+    "loaded": false,
+    "keepaliveSeconds": 600,
+    "remainingKeepaliveSeconds": null
   }
 }
 ```
@@ -141,6 +152,27 @@ PYTHONPATH=. python recorder_agent.py transcribe /path/to/audio.mp3 \
 
 CLI 同样遵守真实转写约束：模型未就绪、音频不存在、FunASR 失败或输出为空时直接失败，不生成假结果。
 
+### 模型闲置保活策略
+
+项目默认采用“短时间保活、长期空闲释放”的策略，而不是永久常驻模型：
+
+```bash
+export FUNASR_KEEPALIVE_SECONDS="600"
+```
+
+含义：
+
+- 第一次真实转写会加载 SenseVoiceSmall。
+- 之后 10 分钟内有新任务，会复用已加载模型，避免频繁冷启动。
+- 超过 10 分钟没有新任务，下一次状态检查或任务执行前会自动释放模型。
+- 如需立即释放，可使用 CLI：
+
+```bash
+PYTHONPATH=. python recorder_agent.py release
+```
+
+`status` / `/api/asr/status` / MCP `recorder_asr_status` 会返回 `runtime` 字段，包括 `loaded`、`keepaliveSeconds`、`idleSeconds`、`remainingKeepaliveSeconds`、`loadCount`、`releaseCount` 等运行时信息。
+
 ### MCP：接入 WorkBuddy
 
 项目提供 MCP Server 入口：
@@ -153,7 +185,8 @@ PYTHONPATH=/path/to/recorder-ai-studio python /path/to/recorder-ai-studio/record
 
 | 工具 | 说明 |
 | --- | --- |
-| `recorder_asr_status` | 查询本地 FunASR / SenseVoiceSmall 模型状态 |
+| `recorder_asr_status` | 查询本地 FunASR / SenseVoiceSmall 模型和运行时保活状态 |
+| `recorder_release_model` | 立即释放当前进程中已加载的本地模型 |
 | `recorder_transcribe` | 对本地音频执行真实转写，并导出 Markdown/JSON |
 
 WorkBuddy 的用户级 MCP 配置示例：
@@ -170,7 +203,8 @@ WorkBuddy 的用户级 MCP 配置示例：
         "FUNASR_VAD_MODEL": "",
         "FUNASR_PUNC_MODEL": "",
         "FUNASR_CHUNK_SECONDS": "60",
-        "FUNASR_BATCH_SIZE_S": "60"
+        "FUNASR_BATCH_SIZE_S": "60",
+        "FUNASR_KEEPALIVE_SECONDS": "600"
       }
     }
   }
@@ -245,12 +279,12 @@ python run_real_asr_test.py
 
 下一阶段建议从以下方向优化：
 
-1. 模型常驻与预热：避免每次请求重复初始化 FunASR 模型。
+1. 模型闲置保活：已支持 10 分钟默认保活，活跃任务复用模型，长期空闲自动释放。
 2. 分片并行化：对长音频按时间片并发识别，再按时间戳归并。
 3. VAD / 标点策略分层：快速预览使用轻量识别，精修模式再启用 VAD、标点和说话人辅助模型。
 4. 进度事件流：为长音频转写增加实时进度、当前分片、预计剩余时间。
 5. 断点续跑：已完成分片落盘缓存，失败后只重跑未完成片段。
-6. 模型加载池：将 SenseVoiceSmall 加载为进程级单例，减少首段延迟。
+6. 任务队列：长录音通过 submit/status/result 三段式工具调用，避免 MCP/API 长时间阻塞。
 7. 导出增强：增加 SRT、VTT、JSONL、Docx 等格式。
 8. 云端校对接入：将本地 ASR 结果送入云端模型做术语校正、纪要结构化和任务提取。
 

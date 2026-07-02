@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from server.agent_tools import model_status, transcribe_audio_file
+from server.agent_tools import model_status, release_model, transcribe_audio_file
 
 
 def print_json(payload: Any) -> None:
@@ -31,6 +31,8 @@ def configure_runtime(args: argparse.Namespace) -> None:
         os.environ["FUNASR_VAD_MODEL"] = args.vad_model
     if getattr(args, "punc_model", None) is not None:
         os.environ["FUNASR_PUNC_MODEL"] = args.punc_model
+    if getattr(args, "keepalive_seconds", None) is not None:
+        os.environ["FUNASR_KEEPALIVE_SECONDS"] = str(args.keepalive_seconds)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -43,10 +45,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size-s", type=int, default=None, help="FunASR batch_size_s value.")
     parser.add_argument("--vad-model", default=None, help="Optional VAD model. Use an empty string to disable.")
     parser.add_argument("--punc-model", default=None, help="Optional punctuation model. Use an empty string to disable.")
+    parser.add_argument("--keepalive-seconds", type=int, default=None, help="Release the loaded model after this many idle seconds. Default: 600.")
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    subparsers.add_parser("status", help="Print local FunASR model status as JSON.")
+    subparsers.add_parser("status", help="Print local FunASR model and runtime status as JSON.")
+    subparsers.add_parser("release", help="Release the loaded FunASR model in the current process.")
 
     transcribe = subparsers.add_parser("transcribe", help="Transcribe an audio file with local FunASR and export Markdown/JSON.")
     transcribe.add_argument("audio", help="Path to audio file.")
@@ -66,6 +70,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "status":
             print_json(model_status(args.model))
+            return 0
+        if args.command == "release":
+            print_json(release_model())
             return 0
         if args.command == "transcribe":
             result = transcribe_audio_file(

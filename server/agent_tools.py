@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
-from .core import generate_insights, get_funasr_model_status, local_funasr_transcript, now_iso, project_to_markdown
+from .core import generate_insights, get_funasr_model_status, get_funasr_runtime_status, local_funasr_transcript, now_iso, project_to_markdown, release_funasr_model
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKSPACE = ROOT.parent
@@ -32,7 +32,11 @@ def parse_glossary(value: Optional[str | Iterable[str]]) -> List[str]:
 
 
 def model_status(model_name: Optional[str] = None) -> Dict[str, Any]:
-    return {"funasr": get_funasr_model_status(model_name)}
+    return {"funasr": get_funasr_model_status(model_name), "runtime": get_funasr_runtime_status()}
+
+
+def release_model() -> Dict[str, Any]:
+    return {"released": True, "runtime": release_funasr_model()}
 
 
 def build_project(
@@ -99,6 +103,7 @@ def transcribe_audio_file(
         "segmentCount": len(segments),
         "project": project,
         "outputs": {},
+        "runtime": get_funasr_runtime_status(),
     }
 
     if write_files:
