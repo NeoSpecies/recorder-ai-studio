@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from server.core import ProjectStore, default_project, generate_insights, normalize_funasr_result, project_to_markdown
+from server.core import ProjectStore, default_project, generate_insights, normalize_funasr_result, project_to_html, project_to_markdown
 
 
 def test_default_project_has_no_mock_content():
@@ -45,5 +45,11 @@ def test_project_store_upload_and_markdown(tmp_path: Path):
     generate_insights(updated)
     store.save_project(updated)
     markdown = project_to_markdown(updated)
+    html = project_to_html(updated)
     assert "# 上传测试" in markdown
     assert "## 转写" in markdown
+    assert "## 核心议题" in markdown
+    assert "转写后工作指导" in markdown
+    assert "录音智能分析报告" in html
+    assert "核心议题与证据" in html
+    assert "完整转写" in html

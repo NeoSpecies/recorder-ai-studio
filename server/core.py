@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import json
 import os
 import re
@@ -9,6 +10,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -429,6 +431,60 @@ def extract_keywords(text: str) -> List[str]:
     return seen[:8]
 
 
+def score_sentence(sentence: str, keywords: List[str]) -> int:
+    score = min(len(sentence), 120) // 12
+    score += sum(3 for keyword in keywords if keyword and keyword in sentence)
+    score += 4 if re.search(r"必须|重点|关键|核心|优先|目标|结论|决定|风险|问题|建议|需要|推进|交付|验证|测试", sentence) else 0
+    return score
+
+
+def pick_ranked_sentences(sentences: List[str], keywords: List[str], pattern: str | None = None, limit: int = 6) -> List[str]:
+    candidates = [sentence for sentence in sentences if not pattern or re.search(pattern, sentence)]
+    ranked = sorted(enumerate(candidates), key=lambda pair: (-score_sentence(pair[1], keywords), pair[0]))
+    picked: List[str] = []
+    for _, sentence in ranked:
+        cleaned = sentence.strip()
+        if cleaned and cleaned not in picked:
+            picked.append(cleaned if len(cleaned) <= 160 else f"{cleaned[:160]}...")
+        if len(picked) >= limit:
+            break
+    return picked
+
+
+def build_topic_cards(sentences: List[str], keywords: List[str]) -> List[Dict[str, Any]]:
+    cards: List[Dict[str, Any]] = []
+    for keyword in keywords[:8]:
+        evidence = [s for s in sentences if keyword in s][:4]
+        if not evidence:
+            continue
+        cards.append({
+            "title": keyword,
+            "brief": evidence[0] if len(evidence[0]) <= 120 else f"{evidence[0][:120]}...",
+            "details": evidence,
+            "weight": len(evidence),
+        })
+    if cards:
+        return cards
+    for index, sentence in enumerate(sentences[:4], start=1):
+        cards.append({"title": f"议题 {index}", "brief": sentence[:120], "details": [sentence], "weight": 1})
+    return cards
+
+
+def build_action_guidance(project: Dict[str, Any], insights: Dict[str, Any]) -> List[Dict[str, str]]:
+    scene = project.get("scene") or "meeting"
+    guidance = [
+        {"step": "1", "title": "先校准专有名词", "desc": "结合术语表、参会人和业务上下文，优先修正公司名、项目名、芯片/模型/版本号等关键实体。"},
+        {"step": "2", "title": "确认核心议题", "desc": "逐条检查“核心议题”和原文证据，删除误识别导致的伪议题，补充缺失背景。"},
+        {"step": "3", "title": "沉淀行动项", "desc": "把“线索与追问”转成负责人、截止时间、验收标准明确的待办。"},
+        {"step": "4", "title": "输出可复用纪要", "desc": "将重点摘要、决策结论、风险和下一步计划整理后同步给相关人员。"},
+    ]
+    if scene == "sales":
+        guidance[2]["desc"] = "把客户线索转为商机阶段、关键人、痛点、预算、下一次跟进动作。"
+    elif scene == "interview":
+        guidance[2]["desc"] = "把候选人/受访者线索转为事实证据、追问问题和后续核验项。"
+    return guidance
+
+
 def generate_insights(project: Dict[str, Any]) -> Dict[str, Any]:
     segments = project.get("segments") or []
     sentences = [item.get("textCorrected") or item.get("textRaw") or "" for item in segments]
@@ -438,8 +494,15 @@ def generate_insights(project: Dict[str, Any]) -> Dict[str, Any]:
     if not sentences:
         insights = {
             "summary": [],
+            "brief": "",
+            "topics": [],
+            "keyPoints": [],
+            "details": [],
             "decisions": [],
             "risks": [],
+            "clues": [],
+            "questions": [],
+            "actionGuidance": [],
             "mindmap": [],
             "keywords": [],
             "generatedAt": now_iso(),
@@ -447,17 +510,36 @@ def generate_insights(project: Dict[str, Any]) -> Dict[str, Any]:
         project["insights"] = insights
         project["updatedAt"] = now_iso()
         return insights
-    summary = [s if len(s) <= 80 else f"{s[:80]}..." for s in sentences[:4]]
-    decisions = [s for s in sentences if re.search(r"采用|确定|决定|先做|必须|建议|目标|需要", s)][:5]
-    risks = [s for s in sentences if re.search(r"风险|不稳定|失败|重试|敏感|隐私|重叠|问题", s)][:5]
+
+    summary = pick_ranked_sentences(sentences, keywords, limit=5)
+    brief = "；".join(summary[:3])
+    if len(brief) > 240:
+        brief = f"{brief[:240]}..."
+    key_points = pick_ranked_sentences(sentences, keywords, r"重点|关键|核心|目标|必须|需要|建议|推进|交付|验证|测试|方案|优化", limit=8)
+    details = pick_ranked_sentences(sentences, keywords, limit=10)
+    decisions = pick_ranked_sentences(sentences, keywords, r"采用|确定|决定|先做|必须|建议|目标|需要|结论|同意", limit=6)
+    risks = pick_ranked_sentences(sentences, keywords, r"风险|不稳定|失败|重试|敏感|隐私|重叠|问题|报错|不可用|瓶颈|慢", limit=6)
+    clues = pick_ranked_sentences(sentences, keywords, r"线索|机会|客户|用户|反馈|需求|痛点|下一步|继续|跟进|验证|测试|观察", limit=8)
+    questions = pick_ranked_sentences(sentences, keywords, r"什么|如何|是否|为什么|能不能|有没有|需要确认|待确认|疑问|问题", limit=6)
+    topics = build_topic_cards(sentences, keywords)
+    keyword_counts = Counter(keyword for keyword in keywords for sentence in sentences if keyword in sentence)
     insights = {
         "summary": summary,
+        "brief": brief,
+        "topics": topics,
+        "keyPoints": key_points or summary,
+        "details": details,
         "decisions": decisions,
         "risks": risks,
-        "mindmap": [project.get("title") or "录音笔记", *keywords[:4]],
+        "clues": clues,
+        "questions": questions,
+        "actionGuidance": [],
+        "mindmap": [project.get("title") or "录音笔记", *[card["title"] for card in topics[:5]]],
         "keywords": keywords,
+        "keywordStats": [{"keyword": keyword, "count": keyword_counts.get(keyword, 0)} for keyword in keywords[:12]],
         "generatedAt": now_iso(),
     }
+    insights["actionGuidance"] = build_action_guidance(project, insights)
     project["insights"] = insights
     merged_tags = set(project.get("tags") or [])
     for keyword in keywords:
@@ -472,8 +554,22 @@ def generate_insights(project: Dict[str, Any]) -> Dict[str, Any]:
 def project_to_markdown(project: Dict[str, Any]) -> str:
     insights = project.get("insights") or {}
     lines = [f"# {project.get('title', '录音项目')}", ""]
-    lines.append("## 摘要")
+    if insights.get("brief"):
+        lines.extend(["## 简述", insights["brief"], ""])
+    lines.append("## 重点摘要")
     for item in insights.get("summary") or []:
+        lines.append(f"- {item}")
+    lines.extend(["", "## 核心议题"])
+    for topic in insights.get("topics") or []:
+        lines.append(f"### {topic.get('title', '议题')}（出现 {topic.get('weight', 1)} 次）")
+        lines.append(topic.get("brief", ""))
+        for detail in topic.get("details") or []:
+            lines.append(f"- {detail}")
+    lines.extend(["", "## 关键重点"])
+    for item in insights.get("keyPoints") or []:
+        lines.append(f"- {item}")
+    lines.extend(["", "## 详情整理"])
+    for item in insights.get("details") or []:
         lines.append(f"- {item}")
     lines.extend(["", "## 决策 / 结论"])
     for item in insights.get("decisions") or []:
@@ -481,6 +577,14 @@ def project_to_markdown(project: Dict[str, Any]) -> str:
     lines.extend(["", "## 风险提示"])
     for item in insights.get("risks") or []:
         lines.append(f"- {item}")
+    lines.extend(["", "## 线索与追问"])
+    for item in insights.get("clues") or []:
+        lines.append(f"- 线索：{item}")
+    for item in insights.get("questions") or []:
+        lines.append(f"- 待确认：{item}")
+    lines.extend(["", "## 转写后工作指导"])
+    for item in insights.get("actionGuidance") or []:
+        lines.append(f"- {item.get('step')}. {item.get('title')}：{item.get('desc')}")
     lines.extend(["", "## 待办"])
     for todo in project.get("todos") or []:
         checked = "x" if todo.get("done") else " "
@@ -492,6 +596,117 @@ def project_to_markdown(project: Dict[str, Any]) -> str:
         lines.append(segment.get("textCorrected") or segment.get("textRaw") or "")
         lines.append("")
     return "\n".join(lines)
+
+
+def project_to_html(project: Dict[str, Any]) -> str:
+    insights = project.get("insights") or {}
+    title = html.escape(project.get("title") or "录音项目")
+    tags = project.get("tags") or []
+    segments = project.get("segments") or []
+    duration = max([float(seg.get("end") or 0) for seg in segments] or [0])
+
+    def esc(value: Any) -> str:
+        return html.escape(str(value or ""))
+
+    def list_items(items: List[Any], empty: str = "暂无") -> str:
+        if not items:
+            return f'<p class="empty">{esc(empty)}</p>'
+        return "<ul>" + "".join(f"<li>{esc(item)}</li>" for item in items) + "</ul>"
+
+    def metric(label: str, value: Any) -> str:
+        return f'<div class="metric"><span>{esc(label)}</span><strong>{esc(value)}</strong></div>'
+
+    topic_cards = "".join(
+        f'''<article class="topic-card">
+          <div class="topic-head"><h3>{esc(topic.get('title'))}</h3><span>{esc(topic.get('weight', 1))} 条证据</span></div>
+          <p>{esc(topic.get('brief'))}</p>
+          {list_items(topic.get('details') or [], '暂无证据')}
+        </article>'''
+        for topic in insights.get("topics") or []
+    ) or '<p class="empty">暂无核心议题</p>'
+
+    guidance = "".join(
+        f'''<div class="step"><b>{esc(item.get('step'))}</b><div><h3>{esc(item.get('title'))}</h3><p>{esc(item.get('desc'))}</p></div></div>'''
+        for item in insights.get("actionGuidance") or []
+    )
+
+    transcript = "".join(
+        f'''<article class="segment">
+          <div><span class="time">{format_time(seg.get('start', 0))}</span><span class="speaker">Speaker {esc(seg.get('speaker'))}</span></div>
+          <p>{esc(seg.get('textCorrected') or seg.get('textRaw'))}</p>
+        </article>'''
+        for seg in segments
+    ) or '<p class="empty">暂无转写内容</p>'
+
+    keyword_stats = insights.get("keywordStats") or []
+    max_count = max([int(item.get("count") or 0) for item in keyword_stats] or [1])
+    keyword_bars = "".join(
+        f'''<div class="bar"><span>{esc(item.get('keyword'))}</span><i style="width:{max(8, int((int(item.get('count') or 0) / max_count) * 100))}%"></i><em>{esc(item.get('count'))}</em></div>'''
+        for item in keyword_stats
+    ) or '<p class="empty">暂无关键词统计</p>'
+
+    return f'''<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>{title} · 录音智能报告</title>
+<style>
+:root {{ color-scheme: light dark; --bg:#f6f7fb; --card:#ffffff; --text:#172033; --muted:#637083; --line:#e6e9f0; --brand:#3b82f6; --brand2:#8b5cf6; --ok:#16a34a; --warn:#d97706; --danger:#dc2626; --chip:#eef4ff; }}
+@media (prefers-color-scheme: dark) {{ :root {{ --bg:#0d1117; --card:#151b23; --text:#e6edf3; --muted:#9aa7b5; --line:#293241; --brand:#60a5fa; --brand2:#a78bfa; --chip:#18263a; }} }}
+* {{ box-sizing:border-box; }} body {{ margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:radial-gradient(circle at 10% -10%, rgba(59,130,246,.22), transparent 36%), var(--bg); color:var(--text); }}
+.container {{ max-width:1180px; margin:0 auto; padding:32px 20px 56px; }}
+.hero {{ display:grid; gap:22px; grid-template-columns:minmax(0,1.5fr) minmax(280px,.8fr); align-items:stretch; }}
+.panel, .card, .topic-card, .segment {{ background:color-mix(in srgb, var(--card) 94%, transparent); border:1px solid var(--line); border-radius:22px; box-shadow:0 18px 48px rgba(15,23,42,.08); }}
+.panel {{ padding:28px; }} h1 {{ margin:0 0 12px; font-size:34px; letter-spacing:-.03em; }} h2 {{ margin:0 0 16px; font-size:22px; }} h3 {{ margin:0; font-size:16px; }} p {{ line-height:1.7; }} .muted {{ color:var(--muted); }}
+.metrics {{ display:grid; grid-template-columns:repeat(2,1fr); gap:12px; }} .metric {{ padding:16px; border-radius:16px; background:var(--chip); }} .metric span {{ display:block; color:var(--muted); font-size:13px; }} .metric strong {{ display:block; margin-top:6px; font-size:22px; }}
+.tags {{ display:flex; flex-wrap:wrap; gap:8px; margin-top:18px; }} .tag {{ padding:6px 10px; border-radius:999px; background:var(--chip); color:var(--brand); font-size:13px; }}
+.grid {{ display:grid; grid-template-columns:1fr 1fr; gap:18px; margin-top:18px; }} .card {{ padding:22px; }} ul {{ padding-left:20px; margin:0; }} li {{ margin:9px 0; line-height:1.65; }}
+.topic-grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }} .topic-card {{ padding:18px; }} .topic-head {{ display:flex; justify-content:space-between; gap:10px; margin-bottom:10px; }} .topic-head span {{ color:var(--muted); font-size:13px; }}
+.steps {{ display:grid; gap:12px; }} .step {{ display:flex; gap:14px; padding:14px; border:1px solid var(--line); border-radius:16px; }} .step b {{ width:30px; height:30px; border-radius:50%; display:grid; place-items:center; color:white; background:linear-gradient(135deg,var(--brand),var(--brand2)); flex:0 0 auto; }} .step p {{ margin:4px 0 0; color:var(--muted); }}
+.bar {{ display:grid; grid-template-columns:90px 1fr 32px; gap:10px; align-items:center; margin:12px 0; }} .bar i {{ display:block; height:10px; border-radius:999px; background:linear-gradient(90deg,var(--brand),var(--brand2)); }} .bar em {{ color:var(--muted); font-style:normal; text-align:right; }}
+.segment {{ padding:16px 18px; margin:12px 0; }} .segment div {{ display:flex; gap:10px; align-items:center; }} .time {{ color:var(--brand); font-weight:700; }} .speaker {{ color:var(--muted); font-size:13px; }} .segment p {{ margin:8px 0 0; }} .empty {{ color:var(--muted); }}
+.section {{ margin-top:28px; }} .full {{ grid-column:1 / -1; }}
+@media (max-width:860px) {{ .hero, .grid, .topic-grid {{ grid-template-columns:1fr; }} h1 {{ font-size:28px; }} }}
+</style>
+</head>
+<body>
+  <main class="container">
+    <section class="hero">
+      <div class="panel">
+        <p class="muted">录音智能分析报告 · 本地 FunASR 转写，无 mock fallback</p>
+        <h1>{title}</h1>
+        <p>{esc(insights.get('brief') or '已完成真实录音转写，可继续进行人工校准、议题确认和行动项沉淀。')}</p>
+        <div class="tags">{''.join(f'<span class="tag">{esc(tag)}</span>' for tag in tags[:20])}</div>
+      </div>
+      <div class="panel metrics">
+        {metric('转写段落', len(segments))}
+        {metric('音频时长', format_time(duration))}
+        {metric('识别来源', project.get('transcriptionSource') or 'local_funasr')}
+        {metric('核心议题', len(insights.get('topics') or []))}
+      </div>
+    </section>
+
+    <section class="grid section">
+      <div class="card"><h2>重点摘要</h2>{list_items(insights.get('summary') or [])}</div>
+      <div class="card"><h2>关键重点</h2>{list_items(insights.get('keyPoints') or [])}</div>
+      <div class="card"><h2>决策 / 结论</h2>{list_items(insights.get('decisions') or [], '暂无明确决策')}</div>
+      <div class="card"><h2>风险提示</h2>{list_items(insights.get('risks') or [], '暂无明显风险')}</div>
+    </section>
+
+    <section class="section panel"><h2>核心议题与证据</h2><div class="topic-grid">{topic_cards}</div></section>
+
+    <section class="grid section">
+      <div class="card"><h2>详情整理</h2>{list_items(insights.get('details') or [])}</div>
+      <div class="card"><h2>线索与追问</h2>{list_items((insights.get('clues') or []) + (insights.get('questions') or []), '暂无线索')}</div>
+      <div class="card"><h2>关键词热度</h2>{keyword_bars}</div>
+      <div class="card"><h2>转写后工作指导</h2><div class="steps">{guidance}</div></div>
+    </section>
+
+    <section class="section panel"><h2>完整转写</h2>{transcript}</section>
+  </main>
+</body>
+</html>'''
 
 
 def format_time(seconds: Any) -> str:
