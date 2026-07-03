@@ -13,7 +13,7 @@ from typing import Any, Optional
 
 from mcp.server.fastmcp import FastMCP
 
-from server.agent_tools import apply_review_to_project, model_status, prepare_review_package, release_model, transcribe_audio_file
+from server.agent_tools import apply_review_to_project, model_status, prepare_review_package, release_model, safe_slug, transcribe_audio_file
 from server.core import generate_insights, now_iso, project_to_html
 from server.glossary import confirm_glossary_terms, list_glossary_terms, reject_glossary_terms, suggest_glossary_terms_for_project, upsert_glossary_term
 
@@ -31,6 +31,7 @@ MAX_WORKERS = max(1, int(os.environ.get("RECORDER_AI_MCP_WORKERS", "1")))
 mcp = FastMCP("recorder-ai-studio")
 _executor = ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="recorder-mcp-job")
 _jobs_lock = threading.RLock()
+_scheduled_job_ids: set[str] = set()
 
 
 def _job_path(job_id: str) -> Path:
@@ -39,6 +40,24 @@ def _job_path(job_id: str) -> Path:
 
 def _log_path(job_id: str) -> Path:
     return JOB_DIR / f"{job_id}.log"
+
+
+def _artifact_dir(job_id: str) -> Path:
+    return JOB_DIR / job_id / "artifacts"
+
+
+def _iter_job_paths() -> list[Path]:
+    if not JOB_DIR.exists():
+        return []
+    return sorted(path for path in JOB_DIR.glob("*.json") if path.is_file())
+
+
+def _submit_job_worker(job_id: str) -> None:
+    with _jobs_lock:
+        if job_id in _scheduled_job_ids:
+            return
+        _scheduled_job_ids.add(job_id)
+    _executor.submit(_run_transcription_job, job_id)
 
 
 def _write_job(job: dict[str, Any]) -> None:
@@ -64,10 +83,114 @@ def _update_job(job_id: str, **updates: Any) -> dict[str, Any]:
         return job
 
 
+def _public_result_from_outputs(outputs: dict[str, Any]) -> Optional[dict[str, Any]]:
+    report_paths: list[Path] = []
+    report_path_value = outputs.get("report")
+    if report_path_value:
+        report_paths.append(Path(report_path_value).expanduser().resolve())
+    output_dir_value = outputs.get("outputDir")
+    if output_dir_value:
+        output_dir = Path(output_dir_value).expanduser().resolve()
+        if output_dir.exists():
+            report_paths.extend(sorted(output_dir.glob("*-report.json")))
+    for report_path in report_paths:
+        if not report_path.exists():
+            continue
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if report.get("ok") is True:
+            report_outputs = dict(report.get("outputs") or {})
+            report_outputs.setdefault("report", str(report_path))
+            report_outputs.setdefault("outputDir", str(report_path.parent))
+            if "sourceAudio" not in report_outputs:
+                audio_candidates = [path for path in report_path.parent.iterdir() if path.is_file() and path.suffix.lower() in {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}]
+                if audio_candidates:
+                    report_outputs["sourceAudio"] = str(audio_candidates[0])
+            report["outputs"] = report_outputs
+            return report
+    return None
+
+
+def _mark_completed_from_artifacts(job: dict[str, Any]) -> Optional[dict[str, Any]]:
+    outputs = dict(job.get("outputs") or {})
+    result = _public_result_from_outputs(outputs)
+    if not result:
+        return None
+    outputs = {**outputs, **dict(result.get("outputs") or {})}
+    job.update(
+        status="completed",
+        resumable=False,
+        completedAt=job.get("completedAt") or now_iso(),
+        result=result,
+        outputs=outputs,
+        segmentCount=result.get("segmentCount"),
+        source=result.get("source"),
+        noMockFallback=result.get("noMockFallback"),
+        recoveredAt=now_iso(),
+    )
+    _write_job(job)
+    return job
+
+
+def _find_existing_job(audio_path: Path, title: str, scene: str, glossary: str) -> Optional[dict[str, Any]]:
+    for path in reversed(_iter_job_paths()):
+        try:
+            job = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        request = job.get("request") or {}
+        if not job.get("jobId") or not request:
+            continue
+        if (
+            request.get("audioPath") == str(audio_path)
+            and request.get("title") == title
+            and request.get("scene") == scene
+            and (request.get("glossary") or "") == (glossary or "")
+        ):
+            return job
+    return None
+
+
+def _recover_incomplete_jobs() -> dict[str, Any]:
+    recovered: list[str] = []
+    completed_from_artifacts: list[str] = []
+    skipped: list[str] = []
+    for path in _iter_job_paths():
+        try:
+            job = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            skipped.append(str(path))
+            continue
+        job_id = job.get("jobId")
+        if not job_id or path != _job_path(job_id):
+            skipped.append(str(path))
+            continue
+        status = job.get("status")
+        if status == "completed":
+            continue
+        if _mark_completed_from_artifacts(job):
+            completed_from_artifacts.append(job_id)
+            continue
+        if status in {"queued", "running"}:
+            job.update(status="queued", resumable=True, recoveredAt=now_iso(), updatedAt=now_iso())
+            _write_job(job)
+            _submit_job_worker(job_id)
+            recovered.append(job_id)
+    return {"recovered": recovered, "completedFromArtifacts": completed_from_artifacts, "skipped": skipped}
+
+
 def _run_transcription_job(job_id: str) -> None:
-    job = _update_job(job_id, status="running", startedAt=now_iso())
     log_path = _log_path(job_id)
     try:
+        job = _update_job(
+            job_id,
+            status="running",
+            resumable=False,
+            startedAt=now_iso(),
+            attempts=int(_read_job(job_id).get("attempts") or 0) + 1,
+        )
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("a", encoding="utf-8") as log_file:
             log_file.write(f"[{now_iso()}] job started\n")
@@ -80,11 +203,13 @@ def _run_transcription_job(job_id: str) -> None:
                     scene=job["request"].get("scene") or "meeting",
                     glossary=job["request"].get("glossary") or "",
                     write_files=True,
+                    output_dir_is_run_dir=True,
                 )
         public_result = {key: value for key, value in result.items() if key != "project"}
         _update_job(
             job_id,
             status="completed",
+            resumable=False,
             completedAt=now_iso(),
             result=public_result,
             outputs=public_result.get("outputs", {}),
@@ -97,10 +222,14 @@ def _run_transcription_job(job_id: str) -> None:
         _update_job(
             job_id,
             status="failed",
+            resumable=True,
             completedAt=now_iso(),
             error=f"{type(exc).__name__}: {exc}",
             logPath=str(log_path),
         )
+    finally:
+        with _jobs_lock:
+            _scheduled_job_ids.discard(job_id)
 
 
 def _submit_transcription_job(
@@ -113,27 +242,73 @@ def _submit_transcription_job(
     audio = Path(audio_path).expanduser().resolve()
     if not audio.exists():
         raise FileNotFoundError(f"Audio file not found: {audio}")
+    resolved_title = title or audio.stem
+    existing_job = _find_existing_job(audio, resolved_title, scene, glossary)
+    if existing_job and existing_job.get("status") == "completed":
+        existing_job = _ensure_html_report(existing_job)
+        return {
+            "ok": True,
+            "submitted": False,
+            "jobId": existing_job["jobId"],
+            "status": "completed",
+            "message": "A completed transcription job already exists for this audio/title. Use recorder_job_result to read outputs.",
+            "jobPath": str(_job_path(existing_job["jobId"])),
+            "logPath": existing_job.get("logPath") or str(_log_path(existing_job["jobId"])),
+            "outputDir": (existing_job.get("outputs") or {}).get("outputDir") or (existing_job.get("request") or {}).get("outputDir"),
+            "outputs": existing_job.get("outputs", {}),
+        }
+    if existing_job and existing_job.get("status") in {"queued", "running"}:
+        job_id = existing_job["jobId"]
+        return {
+            "ok": True,
+            "submitted": False,
+            "resumed": False,
+            "jobId": job_id,
+            "status": existing_job.get("status"),
+            "message": "An incomplete transcription job already exists for this audio/title. Use recorder_job_status to continue tracking it.",
+            "jobPath": str(_job_path(job_id)),
+            "logPath": existing_job.get("logPath") or str(_log_path(job_id)),
+            "outputDir": (existing_job.get("request") or {}).get("outputDir"),
+        }
+    if existing_job and existing_job.get("status") == "failed":
+        job_id = existing_job["jobId"]
+        job = _update_job(job_id, status="queued", resumable=True, lastError=existing_job.get("error"), error=None, recoveredAt=now_iso())
+        _submit_job_worker(job_id)
+        return {
+            "ok": True,
+            "submitted": True,
+            "resumed": True,
+            "jobId": job_id,
+            "status": "queued",
+            "message": "Existing failed transcription job resumed. Use recorder_job_status and recorder_job_result to check progress and outputs.",
+            "jobPath": str(_job_path(job_id)),
+            "logPath": job.get("logPath") or str(_log_path(job_id)),
+            "outputDir": (job.get("request") or {}).get("outputDir"),
+        }
 
     job_id = f"rec-{int(time.time())}-{uuid.uuid4().hex[:8]}"
-    target_output_dir = Path(output_dir).expanduser().resolve() if output_dir else JOB_DIR / job_id
+    target_output_dir = (Path(output_dir).expanduser().resolve() / job_id / "artifacts") if output_dir else _artifact_dir(job_id)
     job = {
         "jobId": job_id,
         "status": "queued",
+        "resumable": True,
         "createdAt": now_iso(),
         "updatedAt": now_iso(),
+        "attempts": 0,
         "request": {
             "audioPath": str(audio),
-            "title": title or audio.stem,
+            "title": resolved_title,
             "scene": scene,
             "glossary": glossary,
             "outputDir": str(target_output_dir),
+            "audioSlug": safe_slug(resolved_title),
         },
-        "outputs": {},
+        "outputs": {"outputDir": str(target_output_dir)},
         "logPath": str(_log_path(job_id)),
     }
     with _jobs_lock:
         _write_job(job)
-    _executor.submit(_run_transcription_job, job_id)
+    _submit_job_worker(job_id)
     return {
         "ok": True,
         "submitted": True,
@@ -150,6 +325,12 @@ def _submit_transcription_job(
 def recorder_asr_status() -> dict:
     """Return local FunASR / SenseVoiceSmall model and runtime status."""
     return model_status()
+
+
+@mcp.tool()
+def recorder_resume_jobs() -> dict:
+    """Scan persisted MCP jobs and resume queued/running jobs from a previous disconnected process."""
+    return {"ok": True, **_recover_incomplete_jobs()}
 
 
 @mcp.tool()
@@ -181,6 +362,12 @@ def recorder_job_status(job_id: str) -> dict:
     job = _read_job(job_id)
     if job.get("status") == "completed":
         job = _ensure_html_report(job)
+    elif job.get("status") in {"queued", "running"} and job_id not in _scheduled_job_ids:
+        if _mark_completed_from_artifacts(job):
+            job = _ensure_html_report(_read_job(job_id))
+        else:
+            job = _update_job(job_id, status="queued", resumable=True, recoveredAt=now_iso())
+            _submit_job_worker(job_id)
     return {key: value for key, value in job.items() if key != "result"}
 
 
@@ -261,6 +448,7 @@ def _ensure_html_report(job: dict[str, Any]) -> dict[str, Any]:
 @mcp.tool()
 def recorder_job_result(job_id: str) -> dict:
     """Return transcription job result after it completes."""
+    status = recorder_job_status(job_id)
     job = _read_job(job_id)
     if job.get("status") != "completed":
         return {
@@ -270,6 +458,8 @@ def recorder_job_result(job_id: str) -> dict:
             "message": "Job is not completed yet. Call recorder_job_status again later.",
             "error": job.get("error"),
             "logPath": job.get("logPath"),
+            "outputs": status.get("outputs", {}),
+            "resumable": status.get("resumable"),
         }
     job = _ensure_html_report(job)
     return {"ok": True, "jobId": job_id, "status": "completed", "result": job.get("result"), "outputs": job.get("outputs", {})}
@@ -294,6 +484,8 @@ def recorder_prepare_review(
         project_json = (job.get("outputs") or {}).get("projectJson")
     if not project_json:
         raise ValueError("Project JSON path is not available.")
+    if output_dir is None and job_id:
+        output_dir = str(Path(project_json).expanduser().resolve().parent)
     result = prepare_review_package(project_json, output_dir=output_dir, max_segments=max_segments, glossary_categories=glossary_categories)
     if job_id:
         job = _read_job(job_id)
@@ -325,6 +517,8 @@ def recorder_apply_review(
         project_json = (job.get("outputs") or {}).get("projectJson")
     if not project_json:
         raise ValueError("Project JSON path is not available.")
+    if output_dir is None and job_id:
+        output_dir = str(Path(project_json).expanduser().resolve().parent)
     result = apply_review_to_project(project_json, review_json, output_dir=output_dir, suffix=suffix)
     if job_id:
         job = _read_job(job_id)
@@ -410,4 +604,5 @@ def recorder_glossary_update(
 
 
 if __name__ == "__main__":
+    _recover_incomplete_jobs()
     mcp.run()

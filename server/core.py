@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 import uuid
+import wave
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -311,16 +312,41 @@ def iter_audio_chunks(audio_path: Path, chunk_seconds: int = 600):
     try:
         import librosa
         import soundfile as sf
-    except Exception as exc:
-        prepared = prepare_audio_for_funasr(audio_path)
-        yield prepared, 0.0
-        return
+    except Exception:
+        try:
+            import soundfile as sf
+            data, loaded_sr = sf.read(str(audio_path), always_2d=False)
+            if getattr(data, "ndim", 1) > 1:
+                data = data.mean(axis=1)
+            sr = int(os.environ.get("FUNASR_SAMPLE_RATE", "16000"))
+            if int(loaded_sr) != sr:
+                prepared = prepare_audio_for_funasr(audio_path)
+                yield prepared, 0.0
+                return
+            samples_per_chunk = max(1, int(sr * chunk_seconds))
+            for start in range(0, len(data), samples_per_chunk):
+                chunk = data[start:start + samples_per_chunk]
+                if len(chunk) == 0:
+                    break
+                tmp = Path(tempfile.NamedTemporaryFile(delete=False, suffix=".wav").name)
+                sf.write(str(tmp), chunk, sr)
+                yield tmp, start / float(sr)
+            return
+        except Exception:
+            prepared = prepare_audio_for_funasr(audio_path)
+            yield prepared, 0.0
+            return
 
     sr = int(os.environ.get("FUNASR_SAMPLE_RATE", "16000"))
     try:
         duration = float(librosa.get_duration(path=str(audio_path)))
     except Exception:
-        duration = float(chunk_seconds)
+        try:
+            with wave.open(str(audio_path), "rb") as wav_file:
+                frame_rate = wav_file.getframerate() or sr
+                duration = wav_file.getnframes() / float(frame_rate)
+        except Exception:
+            duration = float(chunk_seconds)
     offset = 0.0
     while offset < max(duration, 0.01):
         y, loaded_sr = librosa.load(str(audio_path), sr=sr, mono=True, offset=offset, duration=chunk_seconds)

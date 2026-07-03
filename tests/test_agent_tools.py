@@ -69,6 +69,14 @@ def test_transcribe_audio_builds_outputs(monkeypatch, tmp_path: Path):
     assert result["noMockFallback"] is True
     assert result["segmentCount"] == 1
     assert result["runtime"]["loaded"] is True
+    output_dir = Path(result["outputs"]["outputDir"])
+    source_audio = Path(result["outputs"]["sourceAudio"])
+    assert output_dir.exists()
+    assert output_dir.parent == out_dir
+    assert output_dir.name.startswith("测试项目-")
+    assert source_audio.exists()
+    assert source_audio.parent == output_dir
+    assert source_audio.read_bytes() == audio.read_bytes()
     assert Path(result["outputs"]["projectJson"]).exists()
     assert Path(result["outputs"]["markdown"]).exists()
     assert Path(result["outputs"]["htmlReport"]).exists()
@@ -82,6 +90,7 @@ def test_mcp_transcribe_submits_non_blocking_job(monkeypatch, tmp_path: Path):
     audio = tmp_path / "sample.wav"
     audio.write_bytes(b"not real audio")
     monkeypatch.setattr(recorder_mcp_server, "JOB_DIR", tmp_path / "jobs")
+    recorder_mcp_server._scheduled_job_ids.clear()
 
     submitted = []
 
@@ -98,12 +107,101 @@ def test_mcp_transcribe_submits_non_blocking_job(monkeypatch, tmp_path: Path):
     assert result["jobId"]
     assert result["status"] == "queued"
     assert submitted and submitted[0][0] == recorder_mcp_server._run_transcription_job
+    recorder_mcp_server._scheduled_job_ids.clear()
     status = recorder_mcp_server.recorder_job_status(result["jobId"])
     assert status["status"] == "queued"
+    assert status["outputs"]["outputDir"].endswith(f"{result['jobId']}/artifacts")
+
+
+def test_mcp_run_job_writes_directory_outputs(monkeypatch, tmp_path: Path):
+    audio = tmp_path / "sample.wav"
+    audio.write_bytes(b"real audio bytes")
+    monkeypatch.setattr(recorder_mcp_server, "JOB_DIR", tmp_path / "jobs")
+    recorder_mcp_server._scheduled_job_ids.clear()
+    monkeypatch.setattr(agent_tools, "get_funasr_model_status", lambda: {"ready": True, "state": "ready"})
+    monkeypatch.setattr(agent_tools, "get_funasr_runtime_status", lambda: {"loaded": True, "keepaliveSeconds": 600})
+    monkeypatch.setattr(
+        agent_tools,
+        "local_funasr_transcript",
+        lambda path: [
+            {
+                "id": "seg-1",
+                "start": 0,
+                "end": 3,
+                "speaker": "A",
+                "name": "未命名",
+                "confidence": 90,
+                "textRaw": "真实识别内容",
+                "textCorrected": "真实识别内容",
+                "tags": ["#会议"],
+            }
+        ],
+    )
+    monkeypatch.setattr(recorder_mcp_server, "transcribe_audio_file", agent_tools.transcribe_audio_file)
+
+    class FakeExecutor:
+        def submit(self, fn, *args, **kwargs):
+            return None
+
+    monkeypatch.setattr(recorder_mcp_server, "_executor", FakeExecutor())
+    submitted = recorder_mcp_server.recorder_transcribe(str(audio), title="目录输出测试")
+    recorder_mcp_server._run_transcription_job(submitted["jobId"])
+
+    status = recorder_mcp_server.recorder_job_status(submitted["jobId"])
+    result = recorder_mcp_server.recorder_job_result(submitted["jobId"])
+    output_dir = Path(result["outputs"]["outputDir"])
+    assert status["status"] == "completed"
+    assert output_dir == tmp_path / "jobs" / submitted["jobId"] / "artifacts"
+    assert Path(result["outputs"]["sourceAudio"]).read_bytes() == audio.read_bytes()
+    assert Path(result["outputs"]["projectJson"]).parent == output_dir
+    assert Path(result["outputs"]["htmlReport"]).parent == output_dir
+
+
+def test_mcp_recovers_incomplete_jobs(monkeypatch, tmp_path: Path):
+    audio = tmp_path / "sample.wav"
+    audio.write_bytes(b"real audio bytes")
+    monkeypatch.setattr(recorder_mcp_server, "JOB_DIR", tmp_path / "jobs")
+    recorder_mcp_server._scheduled_job_ids.clear()
+    submitted = []
+
+    class FakeExecutor:
+        def submit(self, fn, *args, **kwargs):
+            submitted.append((fn, args, kwargs))
+            return None
+
+    monkeypatch.setattr(recorder_mcp_server, "_executor", FakeExecutor())
+    job = {
+        "jobId": "job-resume",
+        "status": "running",
+        "resumable": True,
+        "createdAt": "now",
+        "updatedAt": "now",
+        "request": {"audioPath": str(audio), "title": "恢复测试", "scene": "meeting", "glossary": "", "outputDir": str(tmp_path / "jobs/job-resume/artifacts")},
+        "outputs": {"outputDir": str(tmp_path / "jobs/job-resume/artifacts")},
+        "logPath": str(tmp_path / "jobs/job-resume.log"),
+    }
+    recorder_mcp_server._write_job(job)
+
+    recovered = recorder_mcp_server.recorder_resume_jobs()
+    status = recorder_mcp_server.recorder_job_status("job-resume")
+
+    assert recovered["ok"] is True
+    assert recovered["recovered"] == ["job-resume"]
+    assert status["status"] == "queued"
+    assert status["resumable"] is True
+    assert submitted and submitted[0][0] == recorder_mcp_server._run_transcription_job
 
 
 def test_mcp_job_result_waits_until_completed(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(recorder_mcp_server, "JOB_DIR", tmp_path / "jobs")
+    submitted = []
+
+    class FakeExecutor:
+        def submit(self, fn, *args, **kwargs):
+            submitted.append((fn, args, kwargs))
+            return None
+
+    monkeypatch.setattr(recorder_mcp_server, "_executor", FakeExecutor())
     job = {
         "jobId": "job-1",
         "status": "running",
@@ -116,7 +214,9 @@ def test_mcp_job_result_waits_until_completed(monkeypatch, tmp_path: Path):
     recorder_mcp_server._write_job(job)
     result = recorder_mcp_server.recorder_job_result("job-1")
     assert result["ok"] is False
-    assert result["status"] == "running"
+    assert result["status"] == "queued"
+    assert result["resumable"] is True
+    assert submitted and submitted[0][0] == recorder_mcp_server._run_transcription_job
 
 
 def test_mcp_job_result_backfills_html_report_for_completed_job(monkeypatch, tmp_path: Path):

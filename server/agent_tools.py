@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
+import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -30,6 +32,31 @@ def parse_glossary(value: Optional[str | Iterable[str]]) -> List[str]:
     if isinstance(value, str):
         return [item.strip() for item in value.split(",") if item.strip()]
     return [str(item).strip() for item in value if str(item).strip()]
+
+
+def unique_child_path(directory: Path, name: str) -> Path:
+    candidate = directory / name
+    if not candidate.exists():
+        return candidate
+    stem = Path(name).stem
+    suffix = Path(name).suffix
+    for index in range(1, 1000):
+        candidate = directory / f"{stem}-{index}{suffix}"
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError(f"Unable to create unique path for {name} in {directory}")
+
+
+def create_run_output_dir(base_dir: str | Path | None, title: Optional[str], audio: Path) -> Path:
+    parent = Path(base_dir).expanduser().resolve() if base_dir else DEFAULT_OUTPUT_DIR
+    slug = safe_slug(title or audio.stem)
+    return unique_child_path(parent, f"{slug}-{time.strftime('%Y%m%d-%H%M%S')}")
+
+
+def copy_source_audio(audio: Path, target_dir: Path) -> Path:
+    copied_audio = unique_child_path(target_dir, audio.name)
+    shutil.copy2(audio, copied_audio)
+    return copied_audio
 
 
 def model_status(model_name: Optional[str] = None) -> Dict[str, Any]:
@@ -87,6 +114,7 @@ def transcribe_audio_file(
     scene: str = "meeting",
     glossary: Optional[str | Iterable[str]] = None,
     write_files: bool = True,
+    output_dir_is_run_dir: bool = False,
 ) -> Dict[str, Any]:
     audio = Path(audio_path).expanduser().resolve()
     if not audio.exists():
@@ -116,9 +144,19 @@ def transcribe_audio_file(
     }
 
     if write_files:
-        target_dir = Path(output_dir).expanduser().resolve() if output_dir else DEFAULT_OUTPUT_DIR
+        if output_dir_is_run_dir:
+            target_dir = Path(output_dir).expanduser().resolve() if output_dir else create_run_output_dir(None, title, audio)
+        else:
+            target_dir = create_run_output_dir(output_dir, title, audio)
         target_dir.mkdir(parents=True, exist_ok=True)
         slug = safe_slug(title or audio.stem)
+        copied_audio = copy_source_audio(audio, target_dir)
+        project["audio"].update({
+            "sourcePath": str(audio),
+            "path": str(copied_audio),
+            "copiedToOutputAt": now_iso(),
+        })
+        result["audio"].update({"sourcePath": str(audio), "copiedPath": str(copied_audio)})
         project_path = target_dir / f"{slug}-project.json"
         transcript_path = target_dir / f"{slug}-transcript.md"
         report_path = target_dir / f"{slug}-report.json"
@@ -128,6 +166,8 @@ def transcribe_audio_file(
         html_path.write_text(project_to_html(project), encoding="utf-8")
         public_result = {key: value for key, value in result.items() if key != "project"}
         public_result["outputs"] = {
+            "outputDir": str(target_dir),
+            "sourceAudio": str(copied_audio),
             "projectJson": str(project_path),
             "markdown": str(transcript_path),
             "htmlReport": str(html_path),
