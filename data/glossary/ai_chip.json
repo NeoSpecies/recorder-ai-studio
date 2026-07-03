@@ -1,0 +1,79 @@
+{
+  "category": "ai_chip",
+  "description": "AI 芯片、微架构、工具链、端侧智能相关术语。",
+  "terms": [
+    {
+      "term": "AI 芯片",
+      "aliases": [
+        "AI芯片",
+        "人工智能芯片"
+      ],
+      "category": "ai_chip",
+      "priority": 9,
+      "frequency": 1,
+      "source": "seed"
+    },
+    {
+      "term": "微架构",
+      "aliases": [
+        "microarchitecture",
+        "芯片微架构"
+      ],
+      "category": "ai_chip",
+      "priority": 8,
+      "frequency": 1,
+      "source": "seed"
+    },
+    {
+      "term": "工具链",
+      "aliases": [
+        "toolchain",
+        "AI 工具链",
+        "芯片工具链"
+      ],
+      "category": "ai_chip",
+      "priority": 9,
+      "frequency": 1,
+      "source": "seed"
+    },
+    {
+      "term": "编译器",
+      "aliases": [
+        "compiler",
+        "AI 编译器"
+      ],
+      "category": "ai_chip",
+      "priority": 8,
+      "frequency": 1,
+      "source": "seed"
+    },
+    {
+      "term": "NPU",
+      "aliases": [
+        "神经网络处理器"
+      ],
+      "category": "ai_chip",
+      "priority": 8,
+      "frequency": 1,
+      "source": "seed"
+    },
+    {
+      "term": "昇腾编译器",
+      "aliases": [
+        "Ascend Compiler",
+        "升腾编译器"
+      ],
+      "category": "ai_chip",
+      "priority": 5,
+      "frequency": 1,
+      "source": "workbuddy_review",
+      "createdAt": "2026-07-03T12:29:11.956459+00:00",
+      "lastSeenAt": "2026-07-03T12:29:11.956460+00:00",
+      "scenes": [
+        "meeting"
+      ],
+      "notes": "会议中明确讨论芯片工具链。"
+    }
+  ],
+  "updatedAt": "2026-07-03T12:29:11.956469+00:00"
+}

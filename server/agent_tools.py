@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from .core import generate_insights, get_funasr_model_status, get_funasr_runtime_status, local_funasr_transcript, now_iso, project_to_html, project_to_markdown, release_funasr_model
+from .glossary import select_project_glossary, update_glossary_from_review
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKSPACE = ROOT.parent
@@ -68,6 +69,14 @@ def build_project(
         "updatedAt": now_iso(),
     }
     generate_insights(project)
+    active_glossary = select_project_glossary(project)
+    project["activeGlossary"] = {
+        "glossaryDir": active_glossary.get("glossaryDir"),
+        "categories": active_glossary.get("categories") or [],
+        "terms": active_glossary.get("terms") or [],
+        "glossaryMatches": active_glossary.get("glossaryMatches") or [],
+        "termCandidates": active_glossary.get("termCandidates") or [],
+    }
     return project
 
 
@@ -151,6 +160,8 @@ def _segment_for_review(segment: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def build_review_prompt(package: Dict[str, Any]) -> str:
+    glossary_summary = ", ".join(item.get("term", "") for item in (package.get("activeGlossary") or {}).get("terms", [])[:40])
+    candidate_summary = ", ".join(item.get("term", "") for item in package.get("termCandidates", [])[:30])
     return f"""# 录音转写校准任务
 
 你是 WorkBuddy 当前智能体。请基于下面的 review package，对本地 FunASR 转写结果进行语义校准和内容优化。不要编造原文不存在的信息；如需推断，请放入 questions 或 clues。
@@ -163,13 +174,23 @@ def build_review_prompt(package: Dict[str, Any]) -> str:
 4. 输出更通顺的 textCorrected，并为重要修改写 correctionNotes。
 5. 重新整理 brief、summary、topics、keyPoints、details、decisions、risks、clues、questions、actionGuidance。
 6. 将可执行事项整理为 todos，包含 title、desc、owner、due、done。
+7. 识别本次会议中稳定可信的专名/术语，按类别写入 confirmedTerms；低置信或有歧义的只放入 questions，不要写入词库。
 
 ## 项目信息
 
 - title: {package.get('title')}
 - scene: {package.get('scene')}
 - segmentCount: {package.get('segmentCount')}
-- glossary: {', '.join(package.get('glossary') or [])}
+- loaded glossary categories: {', '.join((package.get('activeGlossary') or {}).get('categories') or [])}
+- active glossary terms: {glossary_summary}
+- candidate terms: {candidate_summary}
+
+## 词库写回原则
+
+- confirmedTerms 只放“高置信、后续复用价值高”的词，例如公司名、产品名、项目名、芯片/模型/工具链名、人名、行业术语。
+- 不要把“我们、这个、需要、问题、会议”等通用词写入词库。
+- 每个词必须带 category，优先使用 ai_chip、ai_agent、nas、business、people、product、technology、meeting。
+- needHumanConfirm=true 或 confidence < 0.72 的词不会自动写入词库。
 
 ## 返回 JSON Schema
 
@@ -183,7 +204,19 @@ def build_review_prompt(package: Dict[str, Any]) -> str:
       "id": "原 segment id",
       "textCorrected": "校准后的文本",
       "correctionNotes": "说明修正了什么，可为空",
+      "needsHumanReview": false,
       "tags": ["#标签"]
+    }}
+  ],
+  "confirmedTerms": [
+    {{
+      "term": "标准术语",
+      "raw": "原识别写法，可选",
+      "aliases": ["别名"],
+      "category": "ai_chip",
+      "confidence": 0.92,
+      "needHumanConfirm": false,
+      "reason": "为什么确认写入词库"
     }}
   ],
   "insights": {{
@@ -204,7 +237,7 @@ def build_review_prompt(package: Dict[str, Any]) -> str:
 
 ## 使用方式
 
-校准完成后，把上述 JSON 作为 recorder_apply_review 的 review_json 参数写回，生成 calibrated HTML/Markdown/JSON 报告。
+校准完成后，把上述 JSON 作为 recorder_apply_review 的 review_json 参数写回，生成 calibrated HTML/Markdown/JSON 报告，并自动将 confirmedTerms 写入分类词库。
 """
 
 
@@ -212,6 +245,7 @@ def prepare_review_package(
     project_path: str | Path,
     output_dir: str | Path | None = None,
     max_segments: int = 120,
+    glossary_categories: Optional[str | Iterable[str]] = None,
 ) -> Dict[str, Any]:
     project_file = Path(project_path).expanduser().resolve()
     if not project_file.exists():
@@ -220,11 +254,20 @@ def prepare_review_package(
     segments = project.get("segments") or []
     review_segments = [_segment_for_review(segment) for segment in segments[:max_segments]]
     low_confidence = [segment for segment in review_segments if isinstance(segment.get("confidence"), (int, float)) and segment.get("confidence", 100) < 85]
+    active_glossary = select_project_glossary(project, explicit_categories=parse_glossary(glossary_categories))
     package: Dict[str, Any] = {
         "projectPath": str(project_file),
         "title": project.get("title"),
         "scene": project.get("scene") or "meeting",
         "glossary": project.get("glossary") or [],
+        "activeGlossary": {
+            "glossaryDir": active_glossary.get("glossaryDir"),
+            "categories": active_glossary.get("categories") or [],
+            "terms": active_glossary.get("terms") or [],
+        },
+        "glossaryMatches": active_glossary.get("glossaryMatches") or [],
+        "termCandidates": active_glossary.get("termCandidates") or [],
+        "lowConfidenceTerms": active_glossary.get("lowConfidenceTerms") or [],
         "segmentCount": len(segments),
         "includedSegmentCount": len(review_segments),
         "truncated": len(segments) > len(review_segments),
@@ -256,6 +299,9 @@ def prepare_review_package(
         "includedSegmentCount": len(review_segments),
         "truncated": package["truncated"],
         "lowConfidenceCount": len(low_confidence),
+        "activeGlossaryCategories": package["activeGlossary"]["categories"],
+        "glossaryMatchCount": len(package["glossaryMatches"]),
+        "termCandidateCount": len(package["termCandidates"]),
         "reviewPackage": package,
         "nextSteps": [
             "Use reviewPromptPath and reviewPackagePath with the current WorkBuddy agent model to produce review_json.",
@@ -297,6 +343,8 @@ def apply_review_to_project(
             corrected_count += 1
         if item.get("correctionNotes"):
             segment["correctionNotes"] = item.get("correctionNotes")
+        if "needsHumanReview" in item:
+            segment["needsHumanReview"] = bool(item.get("needsHumanReview"))
         if item.get("tags"):
             segment["tags"] = sorted(set((segment.get("tags") or []) + [str(tag) for tag in item.get("tags") or []]))
 
@@ -307,11 +355,14 @@ def apply_review_to_project(
         project["insights"].setdefault("generatedAt", now_iso())
     else:
         generate_insights(project)
+    glossary_update = update_glossary_from_review(project, review, default_category=project.get("scene") or "meeting")
     project["review"] = {
         "calibratedAt": now_iso(),
         "reviewSummary": review.get("reviewSummary") or "",
         "correctedSegmentCount": corrected_count,
         "sourceProjectJson": str(project_file),
+        "confirmedTerms": review.get("confirmedTerms") or review.get("glossaryUpdates") or [],
+        "glossaryUpdate": glossary_update,
     }
     project["updatedAt"] = now_iso()
 
@@ -342,6 +393,7 @@ def apply_review_to_project(
             "calibratedHtmlReport": str(calibrated_html),
             "calibratedReport": str(calibrated_report),
         },
+        "glossaryUpdate": glossary_update,
         "nextSteps": [
             "Open outputs.calibratedHtmlReport to review the final polished report.",
             "Share outputs.calibratedMarkdown as the editable meeting note if needed.",

@@ -1,0 +1,42 @@
+{
+  "category": "global",
+  "description": "通用词库：只放跨场景高频、稳定、低歧义的基础术语。",
+  "terms": [
+    {
+      "term": "FunASR",
+      "aliases": ["fun asr", "凡 ASR"],
+      "category": "global",
+      "priority": 10,
+      "frequency": 1,
+      "source": "seed",
+      "notes": "本地语音识别框架。"
+    },
+    {
+      "term": "SenseVoiceSmall",
+      "aliases": ["Sense Voice Small", "sensevoice small"],
+      "category": "global",
+      "priority": 10,
+      "frequency": 1,
+      "source": "seed",
+      "notes": "当前默认本地 ASR 模型。"
+    },
+    {
+      "term": "WorkBuddy",
+      "aliases": ["work buddy", "CodeBuddy"],
+      "category": "global",
+      "priority": 10,
+      "frequency": 1,
+      "source": "seed",
+      "notes": "智能体与 MCP 编排环境。"
+    },
+    {
+      "term": "MCP",
+      "aliases": ["Model Context Protocol", "模型上下文协议"],
+      "category": "global",
+      "priority": 9,
+      "frequency": 1,
+      "source": "seed",
+      "notes": "连接器协议。"
+    }
+  ]
+}

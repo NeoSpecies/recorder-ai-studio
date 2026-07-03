@@ -4,6 +4,7 @@ import pytest
 
 import recorder_mcp_server
 from server import agent_tools
+from server.glossary import load_glossary, select_project_glossary
 
 
 def test_safe_slug_handles_mixed_title():
@@ -170,7 +171,28 @@ def test_mcp_job_result_backfills_html_report_for_completed_job(monkeypatch, tmp
     assert "htmlReport" in report_path.read_text(encoding="utf-8")
 
 
-def test_prepare_and_apply_review_package(tmp_path: Path):
+def test_dynamic_glossary_selects_categories_and_candidates(tmp_path: Path):
+    glossary_dir = tmp_path / "glossary"
+    glossary_dir.mkdir()
+    (glossary_dir / "global.json").write_text('{"category":"global","terms":[{"term":"MCP","aliases":["模型上下文协议"],"category":"global","priority":9}]}', encoding="utf-8")
+    (glossary_dir / "ai_chip.json").write_text('{"category":"ai_chip","terms":[{"term":"工具链","aliases":["toolchain"],"category":"ai_chip","priority":9}]}', encoding="utf-8")
+    project = {
+        "title": "芯片与工具链会议",
+        "scene": "technical_review",
+        "glossary": [],
+        "segments": [
+            {"id": "seg-1", "textRaw": "这次讨论 AI 芯片工具链和昇腾编译器。", "textCorrected": "这次讨论 AI 芯片工具链和昇腾编译器。", "confidence": 92}
+        ],
+    }
+    selected = select_project_glossary(project, glossary_dir=glossary_dir)
+    assert "ai_chip" in selected["categories"]
+    assert any(item["term"] == "工具链" for item in selected["glossaryMatches"])
+    assert any(item["term"] == "昇腾编译器" for item in selected["termCandidates"])
+
+
+
+def test_prepare_and_apply_review_package(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("RECORDER_AI_GLOSSARY_DIR", str(tmp_path / "glossary"))
     out_dir = tmp_path / "outputs"
     out_dir.mkdir()
     project_path = out_dir / "review-sample-project.json"
@@ -197,6 +219,9 @@ def test_prepare_and_apply_review_package(tmp_path: Path):
     assert Path(package["reviewPackagePath"]).exists()
     assert Path(package["reviewPromptPath"]).exists()
     assert package["lowConfidenceCount"] == 1
+    assert package["activeGlossaryCategories"]
+    assert "termCandidates" in Path(package["reviewPackagePath"]).read_text(encoding="utf-8")
+    assert "confirmedTerms" in Path(package["reviewPromptPath"]).read_text(encoding="utf-8")
     assert "recorder_apply_review" in Path(package["reviewPromptPath"]).read_text(encoding="utf-8")
 
     review_json = """
@@ -218,6 +243,7 @@ def test_prepare_and_apply_review_package(tmp_path: Path):
         "actionGuidance": [{"step": "1", "title": "复核结果", "desc": "检查校准后纪要。"}],
         "keywords": ["校准"]
       },
+      "confirmedTerms": [{"term": "昇腾编译器", "raw": "升腾编译器", "aliases": ["Ascend Compiler"], "category": "ai_chip", "confidence": 0.94, "needHumanConfirm": false, "reason": "会议中明确讨论芯片工具链。"}],
       "todos": [{"title": "复核校准报告", "desc": "确认文本通顺", "owner": "未分配", "due": "", "done": false}]
     }
     """
@@ -230,6 +256,8 @@ def test_prepare_and_apply_review_package(tmp_path: Path):
     calibrated = Path(applied["outputs"]["calibratedProjectJson"]).read_text(encoding="utf-8")
     assert "我们需要完成转写校准" in calibrated
     assert "correctionNotes" in calibrated
+    assert applied["glossaryUpdate"]["updatedTerms"]
+    assert any("昇腾编译器" in Path(item["path"]).read_text(encoding="utf-8") for item in applied["glossaryUpdate"]["updatedTerms"])
 
 
 def test_mcp_job_status_backfills_html_report_for_completed_job(monkeypatch, tmp_path: Path):
@@ -282,6 +310,7 @@ def test_mcp_job_status_backfills_html_report_for_completed_job(monkeypatch, tmp
 
 
 def test_mcp_prepare_and_apply_review(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("RECORDER_AI_GLOSSARY_DIR", str(tmp_path / "glossary"))
     monkeypatch.setattr(recorder_mcp_server, "JOB_DIR", tmp_path / "jobs")
     out_dir = tmp_path / "outputs"
     out_dir.mkdir()

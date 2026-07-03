@@ -6,7 +6,9 @@ __pycache__/
 htmlcov/
 
 # Local runtime data and uploaded/private audio
-data/
+data/*
+!data/glossary/
+!data/glossary/*.json
 data-*/
 uploads/
 uploads-*/

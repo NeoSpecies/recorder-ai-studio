@@ -1,0 +1,38 @@
+{
+  "category": "ai_agent",
+  "description": "AI Agent、RAG、记忆、智能体编排相关术语。",
+  "terms": [
+    {
+      "term": "AI Agent",
+      "aliases": ["Agent", "智能体", "AI智能体"],
+      "category": "ai_agent",
+      "priority": 9,
+      "frequency": 1,
+      "source": "seed"
+    },
+    {
+      "term": "RAG",
+      "aliases": ["检索增强生成", "召回增强生成"],
+      "category": "ai_agent",
+      "priority": 9,
+      "frequency": 1,
+      "source": "seed"
+    },
+    {
+      "term": "多智能体",
+      "aliases": ["multi-agent", "Multi Agent"],
+      "category": "ai_agent",
+      "priority": 8,
+      "frequency": 1,
+      "source": "seed"
+    },
+    {
+      "term": "记忆召回",
+      "aliases": ["memory retrieval", "召回系统"],
+      "category": "ai_agent",
+      "priority": 8,
+      "frequency": 1,
+      "source": "seed"
+    }
+  ]
+}

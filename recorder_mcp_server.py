@@ -280,6 +280,7 @@ def recorder_prepare_review(
     project_json: Optional[str] = None,
     output_dir: Optional[str] = None,
     max_segments: int = 120,
+    glossary_categories: Optional[str] = None,
 ) -> dict:
     """Prepare a review package for the WorkBuddy agent to calibrate transcript text and insights."""
     if not project_json:
@@ -292,7 +293,7 @@ def recorder_prepare_review(
         project_json = (job.get("outputs") or {}).get("projectJson")
     if not project_json:
         raise ValueError("Project JSON path is not available.")
-    result = prepare_review_package(project_json, output_dir=output_dir, max_segments=max_segments)
+    result = prepare_review_package(project_json, output_dir=output_dir, max_segments=max_segments, glossary_categories=glossary_categories)
     if job_id:
         job = _read_job(job_id)
         outputs = dict(job.get("outputs") or {})

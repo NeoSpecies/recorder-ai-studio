@@ -630,9 +630,50 @@ def project_to_html(project: Dict[str, Any]) -> str:
         for item in insights.get("actionGuidance") or []
     )
 
+    review = project.get("review") or {}
+    active_glossary = project.get("activeGlossary") or {}
+    glossary_update = review.get("glossaryUpdate") or project.get("glossaryUpdate") or {}
+    confirmed_terms = review.get("confirmedTerms") or []
+    glossary_terms = active_glossary.get("terms") or []
+    glossary_categories = active_glossary.get("categories") or []
+    review_segments = [seg for seg in segments if seg.get("correctionNotes") or seg.get("needsHumanReview") or (seg.get("textRaw") and seg.get("textCorrected") and seg.get("textRaw") != seg.get("textCorrected"))]
+
+    def glossary_chip(term: Any) -> str:
+        if isinstance(term, dict):
+            label = term.get("term") or term.get("corrected") or term.get("raw") or ""
+            category = term.get("category") or "未分类"
+            meta = f"{category}"
+            if term.get("confidence") is not None:
+                meta += f" · {term.get('confidence')}"
+        else:
+            label = str(term)
+            meta = "confirmed"
+        return f'<span class="term-chip"><b>{esc(label)}</b><small>{esc(meta)}</small></span>'
+
+    glossary_panel = f'''
+      <div class="card"><h2>动态词库与专名校准</h2>
+        <p class="muted">本次仅加载相关分类词库，减少上下文污染；校准后高置信术语会写回分类词库，后续同类会议自动复用。</p>
+        <div class="mini-title">本次加载分类</div>
+        <div class="chip-row">{''.join(f'<span class="tag">{esc(item)}</span>' for item in glossary_categories[:16]) or '<span class="empty">暂无分类</span>'}</div>
+        <div class="mini-title">命中/候选词</div>
+        <div class="chip-row">{''.join(glossary_chip(item) for item in glossary_terms[:24]) or '<span class="empty">暂无命中词库</span>'}</div>
+        <div class="mini-title">本次确认写入</div>
+        <div class="chip-row">{''.join(glossary_chip(item) for item in confirmed_terms[:24]) or ''.join(glossary_chip(item) for item in glossary_update.get('updatedTerms', [])[:24]) or '<span class="empty">暂无新写入词条</span>'}</div>
+      </div>
+    '''
+
+    review_cards = "".join(
+        f'''<article class="review-card {'needs-review' if seg.get('needsHumanReview') else ''}">
+          <div class="review-head"><span class="time">{format_time(seg.get('start', 0))}</span><span class="speaker">Speaker {esc(seg.get('speaker'))}</span>{'<strong>待人工复核</strong>' if seg.get('needsHumanReview') else ''}</div>
+          <div class="diff"><div><b>原文</b><p>{esc(seg.get('textRaw') or '')}</p></div><div><b>校准后</b><p>{esc(seg.get('textCorrected') or seg.get('textRaw') or '')}</p></div></div>
+          {f'<p class="note">{esc(seg.get("correctionNotes"))}</p>' if seg.get('correctionNotes') else ''}
+        </article>'''
+        for seg in review_segments[:80]
+    ) or '<p class="empty">暂无明显校准修改或人工复核片段</p>'
+
     transcript = "".join(
-        f'''<article class="segment">
-          <div><span class="time">{format_time(seg.get('start', 0))}</span><span class="speaker">Speaker {esc(seg.get('speaker'))}</span></div>
+        f'''<article class="segment {'needs-review' if seg.get('needsHumanReview') else ''}">
+          <div><span class="time">{format_time(seg.get('start', 0))}</span><span class="speaker">Speaker {esc(seg.get('speaker'))}</span>{'<strong class="review-badge">待复核</strong>' if seg.get('needsHumanReview') else ''}</div>
           <p>{esc(seg.get('textCorrected') or seg.get('textRaw'))}</p>
         </article>'''
         for seg in segments
@@ -666,6 +707,8 @@ def project_to_html(project: Dict[str, Any]) -> str:
 .steps {{ display:grid; gap:12px; }} .step {{ display:flex; gap:14px; padding:14px; border:1px solid var(--line); border-radius:16px; }} .step b {{ width:30px; height:30px; border-radius:50%; display:grid; place-items:center; color:white; background:linear-gradient(135deg,var(--brand),var(--brand2)); flex:0 0 auto; }} .step p {{ margin:4px 0 0; color:var(--muted); }}
 .bar {{ display:grid; grid-template-columns:90px 1fr 32px; gap:10px; align-items:center; margin:12px 0; }} .bar i {{ display:block; height:10px; border-radius:999px; background:linear-gradient(90deg,var(--brand),var(--brand2)); }} .bar em {{ color:var(--muted); font-style:normal; text-align:right; }}
 .segment {{ padding:16px 18px; margin:12px 0; }} .segment div {{ display:flex; gap:10px; align-items:center; }} .time {{ color:var(--brand); font-weight:700; }} .speaker {{ color:var(--muted); font-size:13px; }} .segment p {{ margin:8px 0 0; }} .empty {{ color:var(--muted); }}
+.term-chip {{ display:inline-flex; flex-direction:column; gap:2px; padding:8px 10px; margin:4px; border-radius:14px; background:var(--chip); border:1px solid var(--line); }} .term-chip b {{ font-size:14px; }} .term-chip small {{ color:var(--muted); }} .chip-row {{ display:flex; flex-wrap:wrap; gap:4px; margin:8px 0 14px; }} .mini-title {{ margin-top:12px; color:var(--muted); font-weight:700; font-size:13px; }}
+.review-card {{ padding:16px; border:1px solid var(--line); border-radius:18px; margin:12px 0; background:color-mix(in srgb, var(--card) 92%, transparent); }} .review-head {{ display:flex; align-items:center; gap:10px; margin-bottom:10px; }} .review-head strong, .review-badge {{ color:var(--warn); font-size:12px; border:1px solid color-mix(in srgb, var(--warn) 35%, transparent); border-radius:999px; padding:3px 8px; }} .needs-review {{ border-color:color-mix(in srgb, var(--warn) 55%, var(--line)); }} .diff {{ display:grid; grid-template-columns:1fr 1fr; gap:12px; }} .diff div {{ padding:12px; border-radius:14px; background:var(--chip); }} .diff b {{ display:block; margin-bottom:6px; color:var(--muted); }} .diff p {{ margin:0; }} .note {{ margin:10px 0 0; color:var(--muted); }}
 .section {{ margin-top:28px; }} .full {{ grid-column:1 / -1; }}
 @media (max-width:860px) {{ .hero, .grid, .topic-grid {{ grid-template-columns:1fr; }} h1 {{ font-size:28px; }} }}
 </style>
@@ -701,6 +744,8 @@ def project_to_html(project: Dict[str, Any]) -> str:
       <div class="card"><h2>线索与追问</h2>{list_items((insights.get('clues') or []) + (insights.get('questions') or []), '暂无线索')}</div>
       <div class="card"><h2>关键词热度</h2>{keyword_bars}</div>
       <div class="card"><h2>转写后工作指导</h2><div class="steps">{guidance}</div></div>
+      {glossary_panel}
+      <div class="card"><h2>校准审阅</h2><p class="muted">展示原文与校准后文本差异、修改说明和需要人工复核的片段。</p>{review_cards}</div>
     </section>
 
     <section class="section panel"><h2>完整转写</h2>{transcript}</section>
