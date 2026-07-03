@@ -241,6 +241,74 @@ def select_project_glossary(project: Dict[str, Any], explicit_categories: Option
     return {**loaded, **analysis}
 
 
+def _normalize_term_update(item: Dict[str, Any], default_category: str = "meeting") -> Dict[str, Any]:
+    term = str(item.get("term") or item.get("corrected") or item.get("canonical") or "").strip()
+    aliases = [str(alias).strip() for alias in item.get("aliases") or [] if str(alias).strip()]
+    raw = str(item.get("raw") or "").strip()
+    if raw and raw.lower() != term.lower():
+        aliases.append(raw)
+    return {
+        "term": term,
+        "aliases": sorted(set(aliases)),
+        "category": normalize_category(item.get("category") or suggest_category(term) or default_category),
+        "priority": int(item.get("priority") or 5),
+        "notes": item.get("notes") or item.get("reason") or "由 WorkBuddy 智能体校准后确认写入。",
+        "source": item.get("source") or "workbuddy_review",
+    }
+
+
+def upsert_glossary_term(
+    item: Dict[str, Any],
+    glossary_dir: str | Path | None = None,
+    default_category: str = "meeting",
+    project: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    root = Path(glossary_dir).expanduser().resolve() if glossary_dir else default_glossary_dir()
+    normalized = _normalize_term_update(item, default_category=default_category)
+    term = normalized["term"]
+    if not term:
+        raise ValueError("Glossary term is required.")
+    category = normalized["category"]
+    data = _read_category_file(category, root)
+    terms = data.setdefault("terms", [])
+    existing = None
+    for record in terms:
+        if str(record.get("term") or "").lower() == term.lower():
+            existing = record
+            break
+    if existing:
+        existing_aliases = set(existing.get("aliases") or [])
+        existing_aliases.update(normalized["aliases"])
+        existing["aliases"] = sorted(existing_aliases)
+        existing["frequency"] = int(existing.get("frequency") or 0) + int(item.get("frequencyIncrement") or 1)
+        existing["lastSeenAt"] = now_iso()
+        existing["source"] = normalized["source"]
+        existing["notes"] = normalized["notes"] or existing.get("notes", "")
+        if item.get("priority") is not None:
+            existing["priority"] = normalized["priority"]
+        if project:
+            scenes = set(existing.get("scenes") or [])
+            scenes.add(project.get("scene") or default_category)
+            existing["scenes"] = sorted(scenes)
+        action = "updated"
+    else:
+        terms.append({
+            "term": term,
+            "aliases": normalized["aliases"],
+            "category": category,
+            "priority": normalized["priority"],
+            "frequency": int(item.get("frequency") or 1),
+            "source": normalized["source"],
+            "createdAt": now_iso(),
+            "lastSeenAt": now_iso(),
+            "scenes": sorted({project.get("scene") if project else default_category}),
+            "notes": normalized["notes"],
+        })
+        action = "created"
+    path = _write_category_file(category, data, root)
+    return {"term": term, "category": category, "path": str(path), "action": action}
+
+
 def update_glossary_from_review(
     project: Dict[str, Any],
     review: Dict[str, Any],
@@ -269,39 +337,126 @@ def update_glossary_from_review(
         if item.get("needHumanConfirm") is True or confidence_value < 0.72:
             skipped.append({"term": term, "reason": "needs_human_confirm_or_low_confidence"})
             continue
-        category = normalize_category(item.get("category") or suggest_category(term) or default_category)
-        data = _read_category_file(category, root)
-        terms = data.setdefault("terms", [])
-        existing = None
-        for record in terms:
-            if str(record.get("term") or "").lower() == term.lower():
-                existing = record
-                break
-        aliases = [str(alias).strip() for alias in item.get("aliases") or [] if str(alias).strip()]
-        raw = str(item.get("raw") or "").strip()
-        if raw and raw.lower() != term.lower():
-            aliases.append(raw)
-        if existing:
-            existing_aliases = set(existing.get("aliases") or [])
-            existing_aliases.update(aliases)
-            existing["aliases"] = sorted(existing_aliases)
-            existing["frequency"] = int(existing.get("frequency") or 0) + 1
-            existing["lastSeenAt"] = now_iso()
-            existing["source"] = "workbuddy_review"
-            existing["notes"] = item.get("notes") or item.get("reason") or existing.get("notes", "")
-        else:
-            terms.append({
-                "term": term,
-                "aliases": sorted(set(aliases)),
-                "category": category,
-                "priority": int(item.get("priority") or 5),
-                "frequency": 1,
-                "source": "workbuddy_review",
-                "createdAt": now_iso(),
-                "lastSeenAt": now_iso(),
-                "scenes": sorted({project.get("scene") or default_category}),
-                "notes": item.get("notes") or item.get("reason") or "由 WorkBuddy 智能体校准后确认写入。",
-            })
-        _write_category_file(category, data, root)
-        updated.append({"term": term, "category": category, "path": str(root / f"{category}.json")})
+        updated.append(upsert_glossary_term(item, glossary_dir=root, default_category=default_category, project=project))
     return {"glossaryDir": str(root), "updatedTerms": updated, "skippedTerms": skipped}
+
+
+def available_glossary_categories(glossary_dir: str | Path | None = None) -> List[str]:
+    root = Path(glossary_dir).expanduser().resolve() if glossary_dir else default_glossary_dir()
+    if not root.exists():
+        return []
+    categories = []
+    for path in sorted(root.glob("*.json")):
+        category = path.stem
+        if category.startswith("_"):
+            continue
+        categories.append(normalize_category(category))
+    return categories
+
+
+def list_glossary_terms(
+    categories: Optional[str | Iterable[str]] = None,
+    keyword: str = "",
+    glossary_dir: str | Path | None = None,
+    limit: int = 200,
+) -> Dict[str, Any]:
+    root = Path(glossary_dir).expanduser().resolve() if glossary_dir else default_glossary_dir()
+    selected_categories = parse_category_list(categories) or available_glossary_categories(root)
+    loaded = load_glossary(selected_categories, glossary_dir=root)
+    needle = str(keyword or "").strip().lower()
+    terms = []
+    for record in loaded.get("terms") or []:
+        haystack = " ".join(_term_texts(record) + [str(record.get("notes") or ""), str(record.get("category") or "")]).lower()
+        if needle and needle not in haystack:
+            continue
+        terms.append(record)
+    terms.sort(key=lambda item: (str(item.get("category") or ""), -int(item.get("priority") or 0), str(item.get("term") or "")))
+    return {
+        "ok": True,
+        "glossaryDir": str(root),
+        "categories": selected_categories,
+        "keyword": keyword,
+        "count": min(len(terms), limit),
+        "terms": terms[:limit],
+    }
+
+
+def suggest_glossary_terms_for_project(
+    project: Dict[str, Any],
+    categories: Optional[str | Iterable[str]] = None,
+    glossary_dir: str | Path | None = None,
+    limit: int = 40,
+) -> Dict[str, Any]:
+    selected = select_project_glossary(project, explicit_categories=parse_category_list(categories), glossary_dir=glossary_dir)
+    return {
+        "ok": True,
+        "glossaryDir": selected.get("glossaryDir"),
+        "categories": selected.get("categories") or [],
+        "glossaryMatches": (selected.get("glossaryMatches") or [])[:limit],
+        "termCandidates": (selected.get("termCandidates") or [])[:limit],
+        "lowConfidenceTerms": selected.get("lowConfidenceTerms") or [],
+        "activeGlossary": (selected.get("terms") or [])[:limit],
+    }
+
+
+def confirm_glossary_terms(
+    terms: List[Dict[str, Any]],
+    glossary_dir: str | Path | None = None,
+    default_category: str = "meeting",
+) -> Dict[str, Any]:
+    root = Path(glossary_dir).expanduser().resolve() if glossary_dir else default_glossary_dir()
+    updated = []
+    skipped = []
+    for item in terms:
+        if isinstance(item, str):
+            item = {"term": item}
+        if not isinstance(item, dict):
+            skipped.append({"item": str(item), "reason": "invalid_item"})
+            continue
+        try:
+            updated.append(upsert_glossary_term({**item, "source": item.get("source") or "manual_confirm"}, glossary_dir=root, default_category=default_category))
+        except Exception as exc:
+            skipped.append({"item": item, "reason": f"{type(exc).__name__}: {exc}"})
+    return {"ok": True, "glossaryDir": str(root), "updatedTerms": updated, "skippedTerms": skipped}
+
+
+def reject_glossary_terms(
+    items: List[Dict[str, Any]],
+    reason: str = "",
+    glossary_dir: str | Path | None = None,
+) -> Dict[str, Any]:
+    root = Path(glossary_dir).expanduser().resolve() if glossary_dir else default_glossary_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / "_rejected.json"
+    if path.exists():
+        data = json.loads(path.read_text(encoding="utf-8"))
+    else:
+        data = {"category": "_rejected", "terms": []}
+    records = data.setdefault("terms", [])
+    added = []
+    existing_keys = {str(item.get("raw") or item.get("term") or "").lower() for item in records}
+    for item in items:
+        if isinstance(item, str):
+            item = {"raw": item}
+        if not isinstance(item, dict):
+            continue
+        raw = str(item.get("raw") or item.get("term") or item.get("candidate") or "").strip()
+        if not raw:
+            continue
+        key = raw.lower()
+        if key in existing_keys:
+            continue
+        record = {
+            "raw": raw,
+            "suggested": item.get("suggested") or item.get("term") or "",
+            "category": normalize_category(item.get("category") or item.get("suggestedCategory") or "rejected"),
+            "reason": item.get("reason") or reason or "用户确认不写入词库。",
+            "rejectedAt": now_iso(),
+            "source": "manual_reject",
+        }
+        records.append(record)
+        added.append(record)
+        existing_keys.add(key)
+    data["updatedAt"] = now_iso()
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"ok": True, "glossaryDir": str(root), "path": str(path), "rejectedTerms": added, "count": len(added)}

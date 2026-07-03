@@ -191,6 +191,37 @@ def test_dynamic_glossary_selects_categories_and_candidates(tmp_path: Path):
 
 
 
+def test_mcp_glossary_interaction_tools(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("RECORDER_AI_GLOSSARY_DIR", str(tmp_path / "glossary"))
+    confirm = recorder_mcp_server.recorder_glossary_confirm(
+        terms_json='{"terms":[{"term":"昇腾编译器","raw":"升腾编译器","aliases":["Ascend Compiler"],"category":"ai_chip","priority":8,"notes":"AI 芯片工具链术语"}]}',
+        default_category="meeting",
+    )
+    assert confirm["ok"] is True
+    assert confirm["updatedTerms"][0]["term"] == "昇腾编译器"
+
+    listed = recorder_mcp_server.recorder_glossary_list(categories="ai_chip", keyword="编译器")
+    assert listed["ok"] is True
+    assert any(item["term"] == "昇腾编译器" for item in listed["terms"])
+
+    updated = recorder_mcp_server.recorder_glossary_update(
+        term="MCP",
+        category="ai_agent",
+        aliases="模型上下文协议,Model Context Protocol",
+        notes="WorkBuddy 连接器常用术语",
+        priority=9,
+    )
+    assert updated["action"] == "created"
+
+    rejected = recorder_mcp_server.recorder_glossary_reject(
+        items_json='{"items":[{"raw":"新新型投资","suggested":"新型投资","category":"business"}]}',
+        reason="上下文不足，暂不写入",
+    )
+    assert rejected["ok"] is True
+    assert rejected["rejectedTerms"][0]["raw"] == "新新型投资"
+
+
+
 def test_prepare_and_apply_review_package(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("RECORDER_AI_GLOSSARY_DIR", str(tmp_path / "glossary"))
     out_dir = tmp_path / "outputs"
@@ -363,3 +394,49 @@ def test_mcp_prepare_and_apply_review(monkeypatch, tmp_path: Path):
     status = recorder_mcp_server.recorder_job_status("job-review")
     assert "reviewPackage" in status["outputs"]
     assert "calibratedHtmlReport" in status["outputs"]
+
+
+def test_mcp_glossary_suggest_from_completed_job(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("RECORDER_AI_GLOSSARY_DIR", str(tmp_path / "glossary"))
+    monkeypatch.setattr(recorder_mcp_server, "JOB_DIR", tmp_path / "jobs")
+    out_dir = tmp_path / "outputs"
+    out_dir.mkdir()
+    project_path = out_dir / "glossary-sample-project.json"
+    project_path.write_text(
+        """
+        {
+          "id": "glossary-sample",
+          "title": "芯片工具链会议",
+          "scene": "technical_review",
+          "glossary": [],
+          "segments": [
+            {"id": "seg-1", "start": 0, "end": 5, "speaker": "A", "confidence": 82, "textRaw": "讨论 AI 芯片工具链和昇腾编译器。", "textCorrected": "讨论 AI 芯片工具链和昇腾编译器。", "tags": []}
+          ],
+          "tags": [],
+          "todos": [],
+          "insights": null,
+          "transcriptionSource": "local_funasr"
+        }
+        """,
+        encoding="utf-8",
+    )
+    report_path = out_dir / "glossary-sample-report.json"
+    report_path.write_text('{"ok": true}', encoding="utf-8")
+    job = {
+        "jobId": "job-glossary",
+        "status": "completed",
+        "createdAt": "now",
+        "updatedAt": "now",
+        "request": {"audioPath": "sample.wav"},
+        "outputs": {"projectJson": str(project_path), "report": str(report_path)},
+        "result": {"ok": True, "outputs": {"projectJson": str(project_path), "report": str(report_path)}},
+        "logPath": str(tmp_path / "jobs/job-glossary.log"),
+    }
+    recorder_mcp_server._write_job(job)
+
+    suggested = recorder_mcp_server.recorder_glossary_suggest(job_id="job-glossary", categories="ai_chip", limit=20)
+
+    assert suggested["ok"] is True
+    assert suggested["jobId"] == "job-glossary"
+    assert any(item["term"] == "昇腾编译器" for item in suggested["termCandidates"])
+    assert suggested["lowConfidenceTerms"]

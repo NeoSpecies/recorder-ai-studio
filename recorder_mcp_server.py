@@ -15,6 +15,7 @@ from mcp.server.fastmcp import FastMCP
 
 from server.agent_tools import apply_review_to_project, model_status, prepare_review_package, release_model, transcribe_audio_file
 from server.core import generate_insights, now_iso, project_to_html
+from server.glossary import confirm_glossary_terms, list_glossary_terms, reject_glossary_terms, suggest_glossary_terms_for_project, upsert_glossary_term
 
 WORKSPACE = Path(__file__).resolve().parent.parent
 os.environ.setdefault("HOME", str(WORKSPACE / ".cache" / "home"))
@@ -334,6 +335,78 @@ def recorder_apply_review(
         job["updatedAt"] = now_iso()
         _write_job(job)
     return result
+
+
+@mcp.tool()
+def recorder_glossary_list(categories: Optional[str] = None, keyword: str = "", limit: int = 200) -> dict:
+    """List glossary terms by category and optional keyword."""
+    return list_glossary_terms(categories=categories, keyword=keyword, limit=limit)
+
+
+@mcp.tool()
+def recorder_glossary_suggest(
+    job_id: Optional[str] = None,
+    project_json: Optional[str] = None,
+    categories: Optional[str] = None,
+    limit: int = 40,
+) -> dict:
+    """Suggest glossary candidates from a completed job or project JSON."""
+    if not project_json:
+        if not job_id:
+            raise ValueError("Either job_id or project_json is required.")
+        job = _read_job(job_id)
+        if job.get("status") != "completed":
+            return {"ok": False, "jobId": job_id, "status": job.get("status"), "message": "Job is not completed yet."}
+        job = _ensure_html_report(job)
+        project_json = (job.get("outputs") or {}).get("projectJson")
+    if not project_json:
+        raise ValueError("Project JSON path is not available.")
+    project_path = Path(project_json).expanduser().resolve()
+    project = json.loads(project_path.read_text(encoding="utf-8"))
+    result = suggest_glossary_terms_for_project(project, categories=categories, limit=limit)
+    result["projectJson"] = str(project_path)
+    if job_id:
+        result["jobId"] = job_id
+    return result
+
+
+@mcp.tool()
+def recorder_glossary_confirm(terms_json: str, default_category: str = "meeting") -> dict:
+    """Confirm and write glossary terms. terms_json may be a JSON array or an object with a terms field."""
+    data = json.loads(terms_json)
+    if isinstance(data, dict):
+        terms = data.get("terms") or data.get("confirmedTerms") or []
+    elif isinstance(data, list):
+        terms = data
+    else:
+        raise ValueError("terms_json must be a JSON array or object.")
+    return confirm_glossary_terms(terms, default_category=default_category)
+
+
+@mcp.tool()
+def recorder_glossary_reject(items_json: str, reason: str = "") -> dict:
+    """Reject glossary candidates so WorkBuddy can avoid repeatedly recommending them."""
+    data = json.loads(items_json)
+    if isinstance(data, dict):
+        items = data.get("items") or data.get("terms") or data.get("rejectedTerms") or []
+    elif isinstance(data, list):
+        items = data
+    else:
+        raise ValueError("items_json must be a JSON array or object.")
+    return reject_glossary_terms(items, reason=reason)
+
+
+@mcp.tool()
+def recorder_glossary_update(
+    term: str,
+    category: str = "meeting",
+    aliases: str = "",
+    notes: str = "",
+    priority: int = 5,
+) -> dict:
+    """Create or update one glossary term directly."""
+    alias_values = [item.strip() for item in aliases.replace("，", ",").split(",") if item.strip()]
+    return upsert_glossary_term({"term": term, "category": category, "aliases": alias_values, "notes": notes, "priority": priority, "source": "manual_update"})
 
 
 if __name__ == "__main__":
